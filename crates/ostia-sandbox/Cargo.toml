@@ -1,0 +1,16 @@
+[package]
+name = "ostia-sandbox"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ostia-core = { path = "../ostia-core" }
+nix = { workspace = true }
+libc = { workspace = true }
+goblin = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+landlock = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
