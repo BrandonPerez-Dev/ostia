@@ -1,0 +1,18 @@
+[package]
+name = "ostia-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "ostia"
+path = "src/main.rs"
+
+[dependencies]
+ostia-core = { path = "../ostia-core" }
+ostia-sandbox = { path = "../ostia-sandbox" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"
