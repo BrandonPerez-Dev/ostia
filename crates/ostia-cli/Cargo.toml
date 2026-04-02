@@ -12,7 +12,9 @@ ostia-core = { path = "../ostia-core" }
 ostia-sandbox = { path = "../ostia-sandbox" }
 clap = { workspace = true }
 anyhow = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "io-std", "net"] }
+axum = "0.8"
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
-serde_json = "1"
