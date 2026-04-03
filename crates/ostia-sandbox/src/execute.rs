@@ -221,6 +221,7 @@ impl SandboxExecutor {
                 // execvp never returns on success.
                 let _err = execvp(&sh, &[&sh, &dash_c, &cmd]);
                 // If we get here, exec failed.
+                eprintln!("ostia: execvp(/bin/sh) failed: {}", std::io::Error::last_os_error());
                 std::process::exit(127);
             }
 
