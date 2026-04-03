@@ -79,7 +79,7 @@ impl McpServer {
         let command = command.to_string();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let profile = config.resolve_profile(&profile_name)?;
+            let profile = config.resolve_profile_from_token(&profile_name)?;
             let executor = SandboxExecutor::from_profile(profile)?;
             executor.execute(&command)
         })
@@ -111,7 +111,7 @@ impl McpServer {
     }
 
     fn exec_list_commands(&self, profile_name: &str) -> Value {
-        match self.config.resolve_profile(profile_name) {
+        match self.config.resolve_profile_from_token(profile_name) {
             Ok(profile) => {
                 let mut binaries: Vec<&String> = profile.binaries.iter().collect();
                 binaries.sort();

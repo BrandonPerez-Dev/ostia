@@ -3,6 +3,11 @@
 /// Provides helpers for spawning the MCP server, managing the JSON-RPC
 /// protocol, and writing test configs with various profile shapes.
 
+use aes_gcm::{
+    aead::{Aead, AeadCore, KeyInit},
+    Aes256Gcm,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -222,6 +227,107 @@ profiles:
       workspace: {workspace}
   beta:
     bundles: [beta-tools]
+    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
+    f
+}
+
+// ─── Auth token helpers ───
+
+/// Generate a random 32-byte AES-256 key for token mode testing.
+pub fn generate_auth_key() -> Vec<u8> {
+    use aes_gcm::aead::OsRng;
+    Aes256Gcm::generate_key(OsRng).to_vec()
+}
+
+/// Encrypt a profile name into a token: base64(nonce_12 || ciphertext || tag_16).
+pub fn encrypt_profile(key: &[u8], profile: &str) -> String {
+    use aes_gcm::aead::OsRng;
+    let cipher = Aes256Gcm::new_from_slice(key).expect("valid 32-byte AES key");
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+        .encrypt(&nonce, profile.as_bytes())
+        .expect("encrypt profile name");
+
+    let mut token_bytes = Vec::with_capacity(12 + ciphertext.len());
+    token_bytes.extend_from_slice(&nonce);
+    token_bytes.extend_from_slice(&ciphertext);
+    BASE64.encode(&token_bytes)
+}
+
+// ─── Token mode config writers ───
+
+/// Write a config with token mode auth (AES-GCM encrypted profile tokens).
+pub fn write_token_mode_config(workspace: &str, key: &[u8]) -> tempfile::NamedTempFile {
+    let key_b64 = BASE64.encode(key);
+    let config = format!(
+        r#"auth:
+  mode: token
+  key: "{key_b64}"
+
+bundles:
+  baseline:
+    binaries: [sh, bash, echo, cat, ls]
+
+profiles:
+  test:
+    bundles: [baseline]
+    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
+    f
+}
+
+/// Write a token mode config with alpha and beta profiles.
+pub fn write_token_mode_multi_config(workspace: &str, key: &[u8]) -> tempfile::NamedTempFile {
+    let key_b64 = BASE64.encode(key);
+    let config = format!(
+        r#"auth:
+  mode: token
+  key: "{key_b64}"
+
+bundles:
+  alpha-tools:
+    binaries: [sh, bash, echo]
+  beta-tools:
+    binaries: [sh, bash, echo, cat]
+
+profiles:
+  alpha:
+    bundles: [alpha-tools]
+    filesystem:
+      workspace: {workspace}
+  beta:
+    bundles: [beta-tools]
+    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
+    f
+}
+
+/// Write a config with explicit open mode auth.
+pub fn write_open_mode_config(workspace: &str) -> tempfile::NamedTempFile {
+    let config = format!(
+        r#"auth:
+  mode: open
+
+bundles:
+  baseline:
+    binaries: [sh, bash, echo, cat, ls]
+
+profiles:
+  test:
+    bundles: [baseline]
     filesystem:
       workspace: {workspace}
 "#
