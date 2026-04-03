@@ -229,12 +229,12 @@ async fn handle_http(
     Json(response)
 }
 
-async fn serve_http(server: Arc<McpServer>, port: u16) -> anyhow::Result<()> {
+async fn serve_http(server: Arc<McpServer>, host: &str, port: u16) -> anyhow::Result<()> {
     let app = axum::Router::new()
         .route("/mcp", axum::routing::post(handle_http))
         .with_state(server);
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port)).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -244,6 +244,7 @@ async fn serve_http(server: Arc<McpServer>, port: u16) -> anyhow::Result<()> {
 pub async fn run_serve(
     config_path: &Path,
     transport: &str,
+    host: &str,
     port: Option<u16>,
 ) -> anyhow::Result<()> {
     let config = OstiaConfig::load(config_path)?;
@@ -251,7 +252,7 @@ pub async fn run_serve(
 
     match transport {
         "stdio" => serve_stdio(server).await,
-        "http" => serve_http(server, port.unwrap_or(8080)).await,
+        "http" => serve_http(server, host, port.unwrap_or(8080)).await,
         other => anyhow::bail!("unknown transport: {}", other),
     }
 }

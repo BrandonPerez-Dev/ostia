@@ -1,0 +1,11 @@
+bundles:
+  baseline:
+    binaries: [sh, bash, echo, cat, ls, head, tail, wc, sort, uniq, grep, sed, awk, date, whoami, env, mkdir, rm, cp, mv, touch, find, xargs]
+  dev-tools:
+    binaries: [git, curl, wget, jq]
+
+profiles:
+  dev:
+    bundles: [baseline, dev-tools]
+    filesystem:
+      workspace: /workspace

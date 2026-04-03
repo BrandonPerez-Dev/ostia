@@ -1,0 +1,7 @@
+target/
+.git/
+specs/
+tests/
+bundles/
+*.md
+test-config.yaml

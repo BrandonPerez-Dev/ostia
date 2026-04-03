@@ -52,7 +52,11 @@ enum Commands {
         #[arg(long, default_value = "stdio")]
         transport: String,
 
-        /// Port for HTTP transport
+        /// Bind address for HTTP transport
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port for HTTP transport (overrides OSTIA_PORT env var)
         #[arg(long)]
         port: Option<u16>,
     },
@@ -68,9 +72,12 @@ fn main() -> ExitCode {
         Commands::Check { config, profile } => {
             check_command(&config, &profile)
         }
-        Commands::Serve { config, transport, port } => {
+        Commands::Serve { config, transport, host, port } => {
+            let port = port.or_else(|| {
+                std::env::var("OSTIA_PORT").ok().and_then(|v| v.parse().ok())
+            });
             let rt = tokio::runtime::Runtime::new().unwrap();
-            match rt.block_on(serve::run_serve(&config, &transport, port)) {
+            match rt.block_on(serve::run_serve(&config, &transport, &host, port)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {}", e);
