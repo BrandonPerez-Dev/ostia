@@ -42,44 +42,41 @@ impl McpServer {
                 let params = &request["params"];
                 let name = params["name"].as_str().unwrap_or("");
                 let arguments = &params["arguments"];
-                let result = self.dispatch_tool(name, arguments).await;
+                let result = self.dispatch_tool(name, arguments, None).await;
                 Some(jsonrpc_success(&id, result))
             }
             _ => Some(jsonrpc_error(&id, -32601, "Method not found")),
         }
     }
 
-    async fn dispatch_tool(&self, name: &str, arguments: &Value) -> Value {
-        match name {
-            "run_command" => {
-                let profile = match arguments["profile"].as_str() {
-                    Some(p) => p,
-                    None => return tool_error("missing required argument: profile"),
-                };
-                let command = match arguments["command"].as_str() {
-                    Some(c) => c,
-                    None => return tool_error("missing required argument: command"),
-                };
-                self.exec_run_command(profile, command).await
-            }
-            "list_commands" => {
-                let profile = match arguments["profile"].as_str() {
-                    Some(p) => p,
-                    None => return tool_error("missing required argument: profile"),
-                };
-                self.exec_list_commands(profile)
-            }
-            _ => tool_error(&format!("unknown tool: {}", name)),
+    async fn dispatch_tool(&self, name: &str, arguments: &Value, allowed_profiles: Option<&[&str]>) -> Value {
+        // Check if tool name matches a config profile
+        if !self.config.profiles.contains_key(name) {
+            return tool_error(&format!("unknown tool: {}", name));
         }
+
+        // If scoped to specific profiles, check access
+        if let Some(allowed) = allowed_profiles {
+            if !allowed.contains(&name) {
+                return tool_error(&format!("tool '{}' is not available on this endpoint", name));
+            }
+        }
+
+        let command = match arguments["command"].as_str() {
+            Some(c) => c,
+            None => return tool_error("missing required argument: command"),
+        };
+
+        self.exec_in_profile(name, command).await
     }
 
-    async fn exec_run_command(&self, profile_name: &str, command: &str) -> Value {
+    async fn exec_in_profile(&self, profile_name: &str, command: &str) -> Value {
         let config = self.config.clone();
         let profile_name = profile_name.to_string();
         let command = command.to_string();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let profile = config.resolve_profile_from_token(&profile_name)?;
+            let profile = config.resolve_profile(&profile_name)?;
             let executor = SandboxExecutor::from_profile(profile)?;
             executor.execute(&command)
         })
@@ -107,22 +104,6 @@ impl McpServer {
             }
             Ok(Err(e)) => tool_error(&format!("{}", e)),
             Err(e) => tool_error(&format!("internal error: {}", e)),
-        }
-    }
-
-    fn exec_list_commands(&self, profile_name: &str) -> Value {
-        match self.config.resolve_profile_from_token(profile_name) {
-            Ok(profile) => {
-                let mut binaries: Vec<&String> = profile.binaries.iter().collect();
-                binaries.sort();
-                let text = binaries
-                    .iter()
-                    .map(|b| b.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                tool_success(&text)
-            }
-            Err(e) => tool_error(&format!("{}", e)),
         }
     }
 }

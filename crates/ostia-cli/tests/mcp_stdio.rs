@@ -95,41 +95,9 @@ fn mcp_tools_list_returns_expected_tools() {
     );
 }
 
-/// Contract 3: list_commands returns available binaries for profile
-/// When a client calls list_commands with a valid profile,
-/// Then the response lists the allowed binaries from that profile's config.
-#[test]
-fn mcp_list_commands_returns_binaries() {
-    // Arrange
-    let workspace = tempfile::tempdir().expect("create workspace");
-    let config = mcp_common::write_mcp_config(workspace.path().to_str().unwrap(), &[]);
-    let mut client = mcp_common::McpClient::spawn(config.path());
-    client.handshake();
-
-    // Act
-    let response = client.call_tool("list_commands", json!({"profile": "test"}));
-
-    // Assert
-    let result = &response["result"];
-    assert!(
-        result["isError"].is_null() || result["isError"] == false,
-        "list_commands should not be an error, got: {:?}",
-        result
-    );
-
-    let text = mcp_common::get_content_text(result);
-    for binary in &["sh", "bash", "echo", "cat", "ls"] {
-        assert!(
-            text.contains(binary),
-            "list_commands should include '{}', got: {:?}",
-            binary, text
-        );
-    }
-}
-
-/// Contract 4: run_command executes a sandboxed command
-/// When a client calls run_command with a valid profile and command,
-/// Then the response contains the command output and exit code 0.
+/// Contract 4: Profile tool executes a sandboxed command
+/// When a client calls a profile tool with a command,
+/// Then the response contains the command output.
 #[test]
 fn mcp_run_command_executes() {
     // Arrange
@@ -141,15 +109,15 @@ fn mcp_run_command_executes() {
 
     // Act
     let response = client.call_tool(
-        "run_command",
-        json!({"profile": "test", "command": "echo hello"}),
+        "test",
+        json!({"command": "echo hello"}),
     );
 
     // Assert
     let result = &response["result"];
     assert!(
         result["isError"].is_null() || result["isError"] == false,
-        "run_command should not be an error, got: {:?}",
+        "profile tool should not be an error, got: {:?}",
         result
     );
 

@@ -150,8 +150,8 @@ fn mcp_http_initialize_handshake() {
     child.wait().ok();
 }
 
-/// Contract 11: HTTP run_command executes a sandboxed command
-/// When a client calls run_command over HTTP,
+/// Contract 11: HTTP profile tool executes a sandboxed command
+/// When a client calls a profile tool over HTTP,
 /// Then the response contains the command output.
 #[test]
 fn mcp_http_run_command_executes() {
@@ -171,8 +171,8 @@ fn mcp_http_run_command_executes() {
             "id": 10,
             "method": "tools/call",
             "params": {
-                "name": "run_command",
-                "arguments": {"profile": "test", "command": "echo http-works"}
+                "name": "test",
+                "arguments": {"command": "echo http-works"}
             }
         }),
     );
@@ -181,7 +181,7 @@ fn mcp_http_run_command_executes() {
     let result = &response["result"];
     assert!(
         result["isError"].is_null() || result["isError"] == false,
-        "run_command should not be an error, got: {:?}",
+        "profile tool should not be an error, got: {:?}",
         result
     );
 
@@ -198,7 +198,7 @@ fn mcp_http_run_command_executes() {
 }
 
 /// Contract 12: Concurrent clients with different profiles
-/// When two clients use different profiles concurrently over HTTP,
+/// When two clients use different profile tools concurrently over HTTP,
 /// Then both get correct responses without blocking each other.
 #[test]
 fn mcp_http_concurrent_clients_different_profiles() {
@@ -209,7 +209,7 @@ fn mcp_http_concurrent_clients_different_profiles() {
     let port = available_port();
     let mut child = spawn_http_server(config.path().to_str().unwrap(), port);
 
-    // Act — two threads, each using a different profile
+    // Act — two threads, each using a different profile tool
     let handle_a = thread::spawn(move || {
         http_handshake(port);
         http_jsonrpc(
@@ -219,8 +219,8 @@ fn mcp_http_concurrent_clients_different_profiles() {
                 "id": 20,
                 "method": "tools/call",
                 "params": {
-                    "name": "run_command",
-                    "arguments": {"profile": "alpha", "command": "echo alpha-ok"}
+                    "name": "alpha",
+                    "arguments": {"command": "echo alpha-ok"}
                 }
             }),
         )
@@ -235,8 +235,8 @@ fn mcp_http_concurrent_clients_different_profiles() {
                 "id": 21,
                 "method": "tools/call",
                 "params": {
-                    "name": "run_command",
-                    "arguments": {"profile": "beta", "command": "echo beta-ok"}
+                    "name": "beta",
+                    "arguments": {"command": "echo beta-ok"}
                 }
             }),
         )

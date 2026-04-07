@@ -190,6 +190,14 @@ impl SandboxExecutor {
                 // Prevent destructors from running on the ptr::read copies.
                 std::mem::forget(binaries_vec);
 
+                // Set CWD to workspace if configured.
+                if let Some(ws) = self.profile.workspace.as_deref() {
+                    if nix::unistd::chdir(ws).is_err() {
+                        eprintln!("ostia: chdir to workspace failed: {}", ws.display());
+                        std::process::exit(125);
+                    }
+                }
+
                 // Apply Landlock filesystem restrictions (defense-in-depth).
                 // This constrains writes to the workspace only, even though the
                 // tmpfs root is technically writable after pivot_root.
