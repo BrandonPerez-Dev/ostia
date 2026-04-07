@@ -61,6 +61,38 @@ impl McpClient {
         }
     }
 
+    /// Spawn `ostia serve` with extra CLI args and optional env vars.
+    ///
+    /// Used for testing flags like `--user-id` or transport options.
+    pub fn spawn_with_args_and_env(
+        config_path: &Path,
+        extra_args: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> Self {
+        let mut cmd = Command::new(ostia_bin());
+        cmd.args(["serve", "--config", config_path.to_str().unwrap()])
+            .args(extra_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        for &(key, value) in extra_env {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn().expect("spawn ostia serve");
+
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+        Self {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        }
+    }
+
     /// Spawn `ostia serve` with additional env vars set on the child process.
     ///
     /// Used to test that parent env vars do NOT leak into the sandbox.
