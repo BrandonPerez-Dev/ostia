@@ -19,7 +19,7 @@ impl McpServer {
         }
     }
 
-    async fn handle_request(&self, request: &Value) -> Option<Value> {
+    async fn handle_request(&self, request: &Value, scope: Option<&[String]>) -> Option<Value> {
         let method = request["method"].as_str().unwrap_or("");
 
         // JSON-RPC 2.0: messages with an id are requests, without are notifications.
@@ -27,6 +27,8 @@ impl McpServer {
             Some(id) if !id.is_null() => id.clone(),
             _ => return None,
         };
+
+        let filter: Option<Vec<&str>> = scope.map(|s| s.iter().map(|p| p.as_str()).collect());
 
         match method {
             "initialize" => Some(jsonrpc_success(
@@ -37,16 +39,35 @@ impl McpServer {
                     "serverInfo": { "name": "ostia", "version": env!("CARGO_PKG_VERSION") }
                 }),
             )),
-            "tools/list" => Some(jsonrpc_success(&id, json!({ "tools": self.profile_tools_schema(None) }))),
+            "tools/list" => Some(jsonrpc_success(
+                &id,
+                json!({ "tools": self.profile_tools_schema(filter.as_deref()) }),
+            )),
             "tools/call" => {
                 let params = &request["params"];
                 let name = params["name"].as_str().unwrap_or("");
                 let arguments = &params["arguments"];
-                let result = self.dispatch_tool(name, arguments, None).await;
+                let result = self.dispatch_tool(name, arguments, filter.as_deref()).await;
                 Some(jsonrpc_success(&id, result))
             }
             _ => Some(jsonrpc_error(&id, -32601, "Method not found")),
         }
+    }
+
+    /// Resolve an endpoint name to a list of profile names.
+    ///
+    /// Checks config.endpoints first (multi-profile grouping), then falls
+    /// back to a single profile name, then returns None.
+    fn resolve_endpoint(&self, name: &str) -> Option<Vec<String>> {
+        // Check configured endpoints first
+        if let Some(profiles) = self.config.endpoints.get(name) {
+            return Some(profiles.clone());
+        }
+        // Fallback: treat name as a single profile
+        if self.config.profiles.contains_key(name) {
+            return Some(vec![name.to_string()]);
+        }
+        None
     }
 
     async fn dispatch_tool(&self, name: &str, arguments: &Value, allowed_profiles: Option<&[&str]>) -> Value {
@@ -185,7 +206,7 @@ async fn serve_stdio(server: Arc<McpServer>) -> anyhow::Result<()> {
             Err(_) => continue,
         };
 
-        if let Some(response) = server.handle_request(&request).await {
+        if let Some(response) = server.handle_request(&request, None).await {
             let out = serde_json::to_string(&response).unwrap();
             stdout.write_all(out.as_bytes()).await.ok();
             stdout.write_all(b"\n").await.ok();
@@ -214,7 +235,47 @@ async fn handle_http(
     };
 
     let response = server
-        .handle_request(&request)
+        .handle_request(&request, None)
+        .await
+        .unwrap_or_else(|| json!({}));
+    Json(response)
+}
+
+async fn handle_http_endpoint(
+    State(server): State<Arc<McpServer>>,
+    axum::extract::Path(endpoint_name): axum::extract::Path<String>,
+    body: String,
+) -> Json<Value> {
+    // Resolve endpoint to profile list
+    let scope = match server.resolve_endpoint(&endpoint_name) {
+        Some(profiles) => profiles,
+        None => {
+            // Extract request id for the error response
+            let id = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("id").cloned())
+                .unwrap_or(Value::Null);
+            return Json(jsonrpc_error(
+                &id,
+                -32001,
+                &format!("unknown endpoint: {}", endpoint_name),
+            ));
+        }
+    };
+
+    let request: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return Json(json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": { "code": -32700, "message": "Parse error" }
+            }));
+        }
+    };
+
+    let response = server
+        .handle_request(&request, Some(&scope))
         .await
         .unwrap_or_else(|| json!({}));
     Json(response)
@@ -223,6 +284,7 @@ async fn handle_http(
 async fn serve_http(server: Arc<McpServer>, host: &str, port: u16) -> anyhow::Result<()> {
     let app = axum::Router::new()
         .route("/mcp", axum::routing::post(handle_http))
+        .route("/mcp/{name}", axum::routing::post(handle_http_endpoint))
         .with_state(server);
 
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port)).await?;
