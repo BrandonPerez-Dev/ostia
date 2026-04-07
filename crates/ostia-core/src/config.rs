@@ -22,10 +22,14 @@ pub struct OstiaConfig {
     pub bundles: HashMap<String, Bundle>,
     #[serde(default)]
     pub profiles: HashMap<String, ProfileDef>,
+    #[serde(default)]
+    pub endpoints: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Bundle {
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub binaries: Vec<String>,
     #[serde(default)]
@@ -34,6 +38,8 @@ pub struct Bundle {
 
 #[derive(Debug, Deserialize)]
 pub struct ProfileDef {
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub bundles: Vec<String>,
     #[serde(default)]
@@ -173,6 +179,72 @@ impl OstiaConfig {
             network_allow,
             auth_checks,
         })
+    }
+
+    /// Build a curated tool description for a profile.
+    ///
+    /// Includes: profile description, featured bundle tools, notable denials,
+    /// and workspace path.
+    pub fn build_tool_description(&self, name: &str, profile_def: &ProfileDef) -> String {
+        let mut parts = Vec::new();
+
+        // Opening line: profile description or name
+        parts.push(
+            profile_def
+                .description
+                .clone()
+                .unwrap_or_else(|| name.to_string()),
+        );
+
+        // Featured tools: bundle descriptions (only bundles with description set)
+        let builtins = crate::builtins::builtin_bundles();
+        let featured: Vec<&str> = profile_def
+            .bundles
+            .iter()
+            .filter_map(|bundle_name| {
+                self.bundles
+                    .get(bundle_name)
+                    .or_else(|| builtins.get(bundle_name))
+                    .and_then(|b| b.description.as_deref())
+            })
+            .collect();
+        if !featured.is_empty() {
+            parts.push(format!("Tools: {}", featured.join(", ")));
+        }
+
+        // Notable denials: deny patterns whose binary is in the profile
+        let all_binaries: HashSet<String> = profile_def
+            .bundles
+            .iter()
+            .filter_map(|bundle_name| {
+                self.bundles
+                    .get(bundle_name)
+                    .or_else(|| builtins.get(bundle_name))
+            })
+            .flat_map(|b| b.binaries.iter().cloned())
+            .collect();
+
+        let notable: Vec<&str> = profile_def
+            .deny
+            .iter()
+            .filter(|pattern| {
+                let binary = pattern.split_whitespace().next().unwrap_or("");
+                all_binaries.contains(binary)
+            })
+            .map(|s| s.as_str())
+            .collect();
+        if !notable.is_empty() {
+            parts.push(format!("Denied: {}", notable.join(", ")));
+        }
+
+        // Workspace path
+        if let Some(fs) = &profile_def.filesystem {
+            if let Some(ws) = &fs.workspace {
+                parts.push(format!("Workspace: {}", ws));
+            }
+        }
+
+        parts.join("\n")
     }
 
     /// Resolve a profile from a token. In open mode (or no auth config), the

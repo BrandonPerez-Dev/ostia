@@ -41,10 +41,10 @@ fn mcp_initialize_handshake() {
     );
 }
 
-/// Contract 2: tools/list returns run_command and list_commands
+/// Contract 2: tools/list returns per-profile tools (V10 interface)
 /// When a client sends tools/list after initialization,
-/// Then the response contains run_command (requires command + profile)
-/// and list_commands (requires profile).
+/// Then the response contains one tool per config profile, each requiring
+/// only a command argument.
 #[test]
 fn mcp_tools_list_returns_expected_tools() {
     // Arrange
@@ -56,57 +56,41 @@ fn mcp_tools_list_returns_expected_tools() {
     // Act
     let response = client.tools_list();
 
-    // Assert
+    // Assert — one tool matching the "test" profile
     let tools = response["result"]["tools"]
         .as_array()
         .expect("tools should be an array");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
-    assert!(
-        tool_names.contains(&"run_command"),
-        "should have run_command tool, got: {:?}",
+    assert_eq!(
+        tool_names.len(),
+        1,
+        "should have exactly 1 tool (one per profile), got: {:?}",
         tool_names
     );
-    assert!(
-        tool_names.contains(&"list_commands"),
-        "should have list_commands tool, got: {:?}",
+    assert_eq!(
+        tool_names[0], "test",
+        "tool name should match profile name, got: {:?}",
         tool_names
     );
 
-    // Verify run_command requires command and profile
-    let run_cmd = tools.iter().find(|t| t["name"] == "run_command").unwrap();
-    let required: Vec<&str> = run_cmd["inputSchema"]["required"]
+    // Verify tool requires only command, not profile
+    let tool = &tools[0];
+    let required: Vec<&str> = tool["inputSchema"]["required"]
         .as_array()
-        .expect("run_command should have required fields")
+        .expect("tool should have required fields")
         .iter()
         .filter_map(|r| r.as_str())
         .collect();
     assert!(
         required.contains(&"command"),
-        "run_command should require 'command', got: {:?}",
+        "tool should require 'command', got: {:?}",
         required
     );
     assert!(
-        required.contains(&"profile"),
-        "run_command should require 'profile', got: {:?}",
-        required
-    );
-
-    // Verify list_commands requires profile
-    let list_cmd = tools
-        .iter()
-        .find(|t| t["name"] == "list_commands")
-        .unwrap();
-    let required: Vec<&str> = list_cmd["inputSchema"]["required"]
-        .as_array()
-        .expect("list_commands should have required fields")
-        .iter()
-        .filter_map(|r| r.as_str())
-        .collect();
-    assert!(
-        required.contains(&"profile"),
-        "list_commands should require 'profile', got: {:?}",
+        !required.contains(&"profile"),
+        "tool should NOT require 'profile', got: {:?}",
         required
     );
 }

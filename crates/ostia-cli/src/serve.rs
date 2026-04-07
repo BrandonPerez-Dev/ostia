@@ -37,7 +37,7 @@ impl McpServer {
                     "serverInfo": { "name": "ostia", "version": env!("CARGO_PKG_VERSION") }
                 }),
             )),
-            "tools/list" => Some(jsonrpc_success(&id, json!({ "tools": tools_schema() }))),
+            "tools/list" => Some(jsonrpc_success(&id, json!({ "tools": self.profile_tools_schema(None) }))),
             "tools/call" => {
                 let params = &request["params"];
                 let name = params["name"].as_str().unwrap_or("");
@@ -153,32 +153,42 @@ fn tool_error(text: &str) -> Value {
 
 // ─── Tool schema ───
 
-fn tools_schema() -> Value {
-    json!([
-        {
-            "name": "run_command",
-            "description": "Execute a command in a sandboxed environment",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile": { "type": "string", "description": "The security profile to use" },
-                    "command": { "type": "string", "description": "The shell command to execute" }
-                },
-                "required": ["profile", "command"]
+impl McpServer {
+    /// Generate tools/list schema dynamically from config profiles.
+    ///
+    /// If `filter` is Some, only include profiles in the given set.
+    /// If `filter` is None, include all profiles.
+    fn profile_tools_schema(&self, filter: Option<&[&str]>) -> Value {
+        let mut tools = Vec::new();
+        let mut profile_names: Vec<&String> = self.config.profiles.keys().collect();
+        profile_names.sort();
+
+        for name in profile_names {
+            if let Some(allowed) = filter {
+                if !allowed.contains(&name.as_str()) {
+                    continue;
+                }
             }
-        },
-        {
-            "name": "list_commands",
-            "description": "List available commands for a security profile",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile": { "type": "string", "description": "The security profile to query" }
-                },
-                "required": ["profile"]
-            }
+            let profile_def = &self.config.profiles[name];
+            let description = self.config.build_tool_description(name, profile_def);
+            tools.push(json!({
+                "name": name,
+                "description": description,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }));
         }
-    ])
+
+        json!(tools)
+    }
 }
 
 // ─── Stdio transport ───
