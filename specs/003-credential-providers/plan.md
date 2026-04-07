@@ -1,7 +1,7 @@
 # Plan: Credential Providers
 
 > Date: 2026-04-07
-> Status: planning
+> Status: complete (V0–V6 built)
 
 ## What & Why
 

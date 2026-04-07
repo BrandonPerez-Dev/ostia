@@ -91,3 +91,19 @@ profiles:
     bundles: [baseline, dev-tools, python-tools]
     filesystem:
       workspace: /workspace
+
+  # Example: profile with credential injection
+  # dev-with-creds:
+  #   description: "Dev shell with cloud credentials"
+  #   bundles: [baseline, dev-tools]
+  #   filesystem:
+  #     workspace: /workspace
+  #   credentials:
+  #     gcloud: preset          # injects CLOUDSDK_AUTH_ACCESS_TOKEN
+  #     github: preset          # injects GITHUB_TOKEN
+  #     aws: preset             # injects AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+  #     custom-secret:
+  #       provider: command
+  #       command: "cat /run/secrets/api-key"
+  #       inject:
+  #         API_KEY: value
