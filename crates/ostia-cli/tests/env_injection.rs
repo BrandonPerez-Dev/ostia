@@ -85,7 +85,7 @@ fn sandbox_has_baseline_env_vars() {
     let text = mcp_common::get_content_text(result);
     assert_eq!(
         text.trim(),
-        "/usr/bin:/bin:/:/dumb",
+        "/usr/bin:/bin:/:dumb",
         "sandbox should have baseline env vars (PATH:HOME:TERM), got: {:?}",
         text
     );

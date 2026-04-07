@@ -4,7 +4,7 @@ use ostia_core::{CommandMatcher, OstiaConfig, Profile};
 
 use anyhow::{Context, Result};
 use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{ForkResult, Pid, close, dup2, execvp, fork, pipe, read};
+use nix::unistd::{ForkResult, Pid, close, dup2, execve, fork, pipe, read};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::{IntoRawFd, RawFd};
@@ -216,7 +216,7 @@ impl SandboxExecutor {
                     std::process::exit(125);
                 }
 
-                // Exec /bin/sh -c "<command>".
+                // Exec /bin/sh -c "<command>" with explicit env (no parent inheritance).
                 let sh = CString::new("/bin/sh").unwrap();
                 let dash_c = CString::new("-c").unwrap();
                 let cmd = CString::new(command).unwrap_or_else(|_| {
@@ -226,10 +226,21 @@ impl SandboxExecutor {
                     CString::new("").unwrap()
                 });
 
-                // execvp never returns on success.
-                let _err = execvp(&sh, &[&sh, &dash_c, &cmd]);
+                // Build explicit env vector: baseline vars + profile env.
+                let mut env_vec: Vec<CString> = Vec::new();
+                env_vec.push(CString::new("PATH=/usr/bin:/bin").unwrap());
+                env_vec.push(CString::new("HOME=/").unwrap());
+                env_vec.push(CString::new("TERM=dumb").unwrap());
+                for (key, value) in &self.profile.env {
+                    if let Ok(entry) = CString::new(format!("{key}={value}")) {
+                        env_vec.push(entry);
+                    }
+                }
+
+                // execve never returns on success. Uses explicit env — no parent inheritance.
+                let _err = execve(&sh, &[&sh, &dash_c, &cmd], &env_vec);
                 // If we get here, exec failed.
-                eprintln!("ostia: execvp(/bin/sh) failed: {}", std::io::Error::last_os_error());
+                eprintln!("ostia: execve(/bin/sh) failed: {}", std::io::Error::last_os_error());
                 std::process::exit(127);
             }
 
@@ -469,6 +480,7 @@ mod tests {
                 deny_write_paths: vec![],
                 network_allow: vec![],
                 auth_checks: vec![],
+                env: HashMap::new(),
             },
             matcher,
             resolved_binaries: HashMap::new(),

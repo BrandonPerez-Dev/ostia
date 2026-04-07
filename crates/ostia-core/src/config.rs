@@ -52,11 +52,25 @@ pub struct ProfileDef {
     pub network: Option<NetworkDef>,
     #[serde(default)]
     pub auth: BTreeMap<String, AuthCheckDef>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub credentials: BTreeMap<String, CredentialDef>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthCheckDef {
     pub check: String,
+}
+
+/// A credential provider definition in the config.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CredentialDef {
+    pub provider: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub inject: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +118,7 @@ pub struct Profile {
     pub deny_write_paths: Vec<PathBuf>,
     pub network_allow: Vec<String>,
     pub auth_checks: Vec<AuthCheck>,
+    pub env: HashMap<String, String>,
 }
 
 impl OstiaConfig {
@@ -167,6 +182,14 @@ impl OstiaConfig {
             })
             .collect();
 
+        // Fetch credentials: start with explicit env vars, then overlay
+        // credential provider results. Credential fetch failures block execution.
+        let mut env = profile_def.env.clone();
+        if !profile_def.credentials.is_empty() {
+            let cred_env = crate::credentials::fetch_credentials(&profile_def.credentials)?;
+            env.extend(cred_env);
+        }
+
         Ok(Profile {
             name: name.to_string(),
             binaries,
@@ -178,6 +201,7 @@ impl OstiaConfig {
             deny_write_paths,
             network_allow,
             auth_checks,
+            env,
         })
     }
 
