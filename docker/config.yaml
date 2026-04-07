@@ -1,11 +1,93 @@
 bundles:
   baseline:
-    binaries: [sh, bash, echo, cat, ls, head, tail, wc, sort, uniq, grep, sed, awk, date, whoami, env, mkdir, rm, cp, mv, touch, find, xargs]
+    binaries:
+      - sh
+      - bash
+      - echo
+      - cat
+      - ls
+      - head
+      - tail
+      - wc
+      - sort
+      - uniq
+      - grep
+      - sed
+      - awk
+      - date
+      - whoami
+      - env
+      - mkdir
+      - rm
+      - cp
+      - mv
+      - touch
+      - find
+      - xargs
+      - tee
+      - tr
+      - cut
+      - paste
+      - dirname
+      - basename
+      - realpath
+      - diff
+      - tar
+      - gzip
+      - gunzip
+      - file
+      - du
+      - df
+      - chmod
+      - chown
+      - ln
+      - test
+      - printf
+      - true
+      - false
+      - yes
+      - seq
+      - sleep
+
   dev-tools:
+    description: "git, curl, wget, jq"
     binaries: [git, curl, wget, jq]
 
+  node-tools:
+    description: "node, npm, npx"
+    binaries: [node, npm, npx]
+
+  python-tools:
+    description: "python3, pip3"
+    binaries: [python3, pip3]
+
 profiles:
+  readonly:
+    description: "Read-only exploration — browse code without modifying files"
+    bundles: [baseline]
+    filesystem:
+      workspace: /workspace
+    deny:
+      - rm *
+      - mv *
+      - cp *
+      - mkdir *
+      - touch *
+
   dev:
+    description: "Standard development shell with git, curl, and jq"
     bundles: [baseline, dev-tools]
+    filesystem:
+      workspace: /workspace
+
+  node:
+    description: "Node.js development with npm and npx"
+    bundles: [baseline, dev-tools, node-tools]
+    filesystem:
+      workspace: /workspace
+
+  python:
+    description: "Python development with pip"
+    bundles: [baseline, dev-tools, python-tools]
     filesystem:
       workspace: /workspace

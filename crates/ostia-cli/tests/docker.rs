@@ -227,7 +227,7 @@ fn docker_mcp_handshake_over_http() {
 
 // ─── Contract 27: Sandboxed command executes via HTTP ───
 
-/// When run_command is called through the Docker container,
+/// When a profile tool is called through the Docker container,
 /// Then the command executes in the sandbox and output is returned.
 #[test]
 #[ignore] // requires Docker
@@ -251,8 +251,8 @@ fn docker_sandboxed_command_executes() {
             "id": 10,
             "method": "tools/call",
             "params": {
-                "name": "run_command",
-                "arguments": { "profile": "dev", "command": "echo docker-sandbox-works" }
+                "name": "dev",
+                "arguments": { "command": "echo docker-sandbox-works" }
             }
         }),
     );
@@ -261,7 +261,7 @@ fn docker_sandboxed_command_executes() {
     let result = &response["result"];
     assert!(
         result["isError"].is_null() || result["isError"] == false,
-        "run_command should succeed, got: {:?}",
+        "dev tool should succeed, got: {:?}",
         result
     );
 
@@ -294,7 +294,7 @@ fn docker_cli_tools_available() {
     let _container = start_docker_http(port, &[]);
     http_handshake(port);
 
-    // Act — test three common CLI tools
+    // Act — test three common CLI tools via the dev profile tool
     let tools = ["git --version", "curl --version", "jq --version"];
     for tool_cmd in &tools {
         let response = http_jsonrpc(
@@ -304,8 +304,8 @@ fn docker_cli_tools_available() {
                 "id": 20,
                 "method": "tools/call",
                 "params": {
-                    "name": "run_command",
-                    "arguments": { "profile": "dev", "command": tool_cmd }
+                    "name": "dev",
+                    "arguments": { "command": tool_cmd }
                 }
             }),
         );
@@ -349,7 +349,7 @@ fn docker_denied_command_returns_error() {
     let _container = start_docker_http(port, &[]);
     http_handshake(port);
 
-    // Act — python is not in the dev profile
+    // Act — python3 is not in the dev profile's bundles
     let response = http_jsonrpc(
         port,
         &json!({
@@ -357,8 +357,8 @@ fn docker_denied_command_returns_error() {
             "id": 30,
             "method": "tools/call",
             "params": {
-                "name": "run_command",
-                "arguments": { "profile": "dev", "command": "python3 -c 'print(1)'" }
+                "name": "dev",
+                "arguments": { "command": "python3 -c 'print(1)'" }
             }
         }),
     );
@@ -409,11 +409,8 @@ fn docker_workspace_volume_mount() {
             "id": 40,
             "method": "tools/call",
             "params": {
-                "name": "run_command",
-                "arguments": {
-                    "profile": "dev",
-                    "command": "cat /workspace/input.txt"
-                }
+                "name": "dev",
+                "arguments": { "command": "cat /workspace/input.txt" }
             }
         }),
     );

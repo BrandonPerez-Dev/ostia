@@ -14,6 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     jq \
     ca-certificates \
+    nodejs \
+    npm \
+    python3 \
+    python3-pip \
+    file \
+    diffutils \
+    tar \
+    gzip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/ostia /usr/local/bin/ostia
