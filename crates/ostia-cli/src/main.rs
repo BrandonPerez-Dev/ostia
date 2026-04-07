@@ -59,6 +59,10 @@ enum Commands {
         /// Port for HTTP transport (overrides OSTIA_PORT env var)
         #[arg(long)]
         port: Option<u16>,
+
+        /// User identity for credential provider templates (overrides OSTIA_USER_ID env var)
+        #[arg(long)]
+        user_id: Option<String>,
     },
 }
 
@@ -72,12 +76,13 @@ fn main() -> ExitCode {
         Commands::Check { config, profile } => {
             check_command(&config, &profile)
         }
-        Commands::Serve { config, transport, host, port } => {
+        Commands::Serve { config, transport, host, port, user_id } => {
             let port = port.or_else(|| {
                 std::env::var("OSTIA_PORT").ok().and_then(|v| v.parse().ok())
             });
+            let user_id = user_id.or_else(|| std::env::var("OSTIA_USER_ID").ok());
             let rt = tokio::runtime::Runtime::new().unwrap();
-            match rt.block_on(serve::run_serve(&config, &transport, &host, port)) {
+            match rt.block_on(serve::run_serve(&config, &transport, &host, port, user_id.as_deref())) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {}", e);

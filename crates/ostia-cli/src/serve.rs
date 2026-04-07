@@ -10,12 +10,14 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 struct McpServer {
     config: Arc<OstiaConfig>,
+    user_id: Option<String>,
 }
 
 impl McpServer {
-    fn new(config: OstiaConfig) -> Self {
+    fn new(config: OstiaConfig, user_id: Option<&str>) -> Self {
         Self {
             config: Arc::new(config),
+            user_id: user_id.map(|s| s.to_string()),
         }
     }
 
@@ -95,9 +97,10 @@ impl McpServer {
         let config = self.config.clone();
         let profile_name = profile_name.to_string();
         let command = command.to_string();
+        let user_id = self.user_id.clone();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let profile = config.resolve_profile(&profile_name)?;
+            let profile = config.resolve_profile_with_identity(&profile_name, user_id.as_deref())?;
             let executor = SandboxExecutor::from_profile(profile)?;
             executor.execute(&command)
         })
@@ -299,9 +302,10 @@ pub async fn run_serve(
     transport: &str,
     host: &str,
     port: Option<u16>,
+    user_id: Option<&str>,
 ) -> anyhow::Result<()> {
     let config = OstiaConfig::load(config_path)?;
-    let server = Arc::new(McpServer::new(config));
+    let server = Arc::new(McpServer::new(config, user_id));
 
     match transport {
         "stdio" => serve_stdio(server).await,

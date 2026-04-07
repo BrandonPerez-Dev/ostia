@@ -55,12 +55,22 @@ pub struct ProfileDef {
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
-    pub credentials: BTreeMap<String, CredentialDef>,
+    pub credentials: BTreeMap<String, CredentialEntry>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthCheckDef {
     pub check: String,
+}
+
+/// A credential entry: either a preset reference or a full provider definition.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum CredentialEntry {
+    /// Preset reference: `gcloud: preset`
+    Preset(String),
+    /// Full provider definition: `{ provider: command, command: "...", inject: { ... } }`
+    Custom(CredentialDef),
 }
 
 /// A credential provider definition in the config.
@@ -69,6 +79,14 @@ pub struct CredentialDef {
     pub provider: String,
     #[serde(default)]
     pub command: Option<String>,
+    #[serde(default)]
+    pub env: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
     #[serde(default)]
     pub inject: HashMap<String, String>,
 }
@@ -129,6 +147,10 @@ impl OstiaConfig {
     }
 
     pub fn resolve_profile(&self, name: &str) -> anyhow::Result<Profile> {
+        self.resolve_profile_with_identity(name, None)
+    }
+
+    pub fn resolve_profile_with_identity(&self, name: &str, user_id: Option<&str>) -> anyhow::Result<Profile> {
         let profile_def = self
             .profiles
             .get(name)
@@ -182,11 +204,11 @@ impl OstiaConfig {
             })
             .collect();
 
-        // Fetch credentials: start with explicit env vars, then overlay
-        // credential provider results. Credential fetch failures block execution.
+        // Resolve credential entries (presets → full definitions), then fetch.
         let mut env = profile_def.env.clone();
         if !profile_def.credentials.is_empty() {
-            let cred_env = crate::credentials::fetch_credentials(&profile_def.credentials)?;
+            let resolved_creds = crate::credentials::resolve_entries(&profile_def.credentials)?;
+            let cred_env = crate::credentials::fetch_credentials(&resolved_creds, user_id)?;
             env.extend(cred_env);
         }
 
