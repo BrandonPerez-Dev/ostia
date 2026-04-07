@@ -41,10 +41,10 @@ fn mcp_initialize_handshake() {
     );
 }
 
-/// Contract 2: tools/list returns run_command and list_commands
+/// Contract 2: tools/list returns per-profile tools (V10 interface)
 /// When a client sends tools/list after initialization,
-/// Then the response contains run_command (requires command + profile)
-/// and list_commands (requires profile).
+/// Then the response contains one tool per config profile, each requiring
+/// only a command argument.
 #[test]
 fn mcp_tools_list_returns_expected_tools() {
     // Arrange
@@ -56,96 +56,48 @@ fn mcp_tools_list_returns_expected_tools() {
     // Act
     let response = client.tools_list();
 
-    // Assert
+    // Assert — one tool matching the "test" profile
     let tools = response["result"]["tools"]
         .as_array()
         .expect("tools should be an array");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
-    assert!(
-        tool_names.contains(&"run_command"),
-        "should have run_command tool, got: {:?}",
+    assert_eq!(
+        tool_names.len(),
+        1,
+        "should have exactly 1 tool (one per profile), got: {:?}",
         tool_names
     );
-    assert!(
-        tool_names.contains(&"list_commands"),
-        "should have list_commands tool, got: {:?}",
+    assert_eq!(
+        tool_names[0], "test",
+        "tool name should match profile name, got: {:?}",
         tool_names
     );
 
-    // Verify run_command requires command and profile
-    let run_cmd = tools.iter().find(|t| t["name"] == "run_command").unwrap();
-    let required: Vec<&str> = run_cmd["inputSchema"]["required"]
+    // Verify tool requires only command, not profile
+    let tool = &tools[0];
+    let required: Vec<&str> = tool["inputSchema"]["required"]
         .as_array()
-        .expect("run_command should have required fields")
+        .expect("tool should have required fields")
         .iter()
         .filter_map(|r| r.as_str())
         .collect();
     assert!(
         required.contains(&"command"),
-        "run_command should require 'command', got: {:?}",
+        "tool should require 'command', got: {:?}",
         required
     );
     assert!(
-        required.contains(&"profile"),
-        "run_command should require 'profile', got: {:?}",
-        required
-    );
-
-    // Verify list_commands requires profile
-    let list_cmd = tools
-        .iter()
-        .find(|t| t["name"] == "list_commands")
-        .unwrap();
-    let required: Vec<&str> = list_cmd["inputSchema"]["required"]
-        .as_array()
-        .expect("list_commands should have required fields")
-        .iter()
-        .filter_map(|r| r.as_str())
-        .collect();
-    assert!(
-        required.contains(&"profile"),
-        "list_commands should require 'profile', got: {:?}",
+        !required.contains(&"profile"),
+        "tool should NOT require 'profile', got: {:?}",
         required
     );
 }
 
-/// Contract 3: list_commands returns available binaries for profile
-/// When a client calls list_commands with a valid profile,
-/// Then the response lists the allowed binaries from that profile's config.
-#[test]
-fn mcp_list_commands_returns_binaries() {
-    // Arrange
-    let workspace = tempfile::tempdir().expect("create workspace");
-    let config = mcp_common::write_mcp_config(workspace.path().to_str().unwrap(), &[]);
-    let mut client = mcp_common::McpClient::spawn(config.path());
-    client.handshake();
-
-    // Act
-    let response = client.call_tool("list_commands", json!({"profile": "test"}));
-
-    // Assert
-    let result = &response["result"];
-    assert!(
-        result["isError"].is_null() || result["isError"] == false,
-        "list_commands should not be an error, got: {:?}",
-        result
-    );
-
-    let text = mcp_common::get_content_text(result);
-    for binary in &["sh", "bash", "echo", "cat", "ls"] {
-        assert!(
-            text.contains(binary),
-            "list_commands should include '{}', got: {:?}",
-            binary, text
-        );
-    }
-}
-
-/// Contract 4: run_command executes a sandboxed command
-/// When a client calls run_command with a valid profile and command,
-/// Then the response contains the command output and exit code 0.
+/// Contract 4: Profile tool executes a sandboxed command
+/// When a client calls a profile tool with a command,
+/// Then the response contains the command output.
 #[test]
 fn mcp_run_command_executes() {
     // Arrange
@@ -157,15 +109,15 @@ fn mcp_run_command_executes() {
 
     // Act
     let response = client.call_tool(
-        "run_command",
-        json!({"profile": "test", "command": "echo hello"}),
+        "test",
+        json!({"command": "echo hello"}),
     );
 
     // Assert
     let result = &response["result"];
     assert!(
         result["isError"].is_null() || result["isError"] == false,
-        "run_command should not be an error, got: {:?}",
+        "profile tool should not be an error, got: {:?}",
         result
     );
 

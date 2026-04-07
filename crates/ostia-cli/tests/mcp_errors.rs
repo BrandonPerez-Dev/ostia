@@ -1,14 +1,14 @@
 //! Integration tests: MCP error handling (V7, Slice 2).
 //!
 //! Validates that the MCP server returns correct errors for denied commands,
-//! invalid profiles, missing arguments, non-zero exit codes, and auth failures.
+//! invalid profiles, missing arguments, and non-zero exit codes.
 
 mod mcp_common;
 
 use serde_json::json;
 
 /// Contract 5: Denied command returns isError
-/// When a client calls run_command with a command not in the profile,
+/// When a client calls a profile tool with a command not in the profile,
 /// Then the response has isError: true and mentions the denial.
 #[test]
 fn mcp_denied_command_returns_error() {
@@ -21,8 +21,8 @@ fn mcp_denied_command_returns_error() {
 
     // Act
     let response = client.call_tool(
-        "run_command",
-        json!({"profile": "test", "command": "curl http://evil.com"}),
+        "test",
+        json!({"command": "curl http://evil.com"}),
     );
 
     // Assert
@@ -43,9 +43,9 @@ fn mcp_denied_command_returns_error() {
     );
 }
 
-/// Contract 6: Invalid profile name returns isError
-/// When a client calls run_command with a profile that doesn't exist,
-/// Then the response has isError: true and mentions the invalid profile.
+/// Contract 6: Unknown tool name returns isError
+/// When a client calls a tool that doesn't match any profile,
+/// Then the response has isError: true and mentions the unknown tool.
 #[test]
 fn mcp_invalid_profile_returns_error() {
     // Arrange
@@ -56,30 +56,29 @@ fn mcp_invalid_profile_returns_error() {
 
     // Act
     let response = client.call_tool(
-        "run_command",
-        json!({"profile": "nonexistent", "command": "echo hello"}),
+        "nonexistent",
+        json!({"command": "echo hello"}),
     );
 
     // Assert
     let result = &response["result"];
     assert_eq!(
         result["isError"], true,
-        "invalid profile should set isError, got: {:?}",
+        "unknown tool should set isError, got: {:?}",
         result
     );
 
     let text = mcp_common::get_content_text(result);
     assert!(
-        text.to_lowercase().contains("profile")
-            || text.to_lowercase().contains("unknown")
+        text.to_lowercase().contains("unknown")
             || text.to_lowercase().contains("not found"),
-        "should mention invalid profile, got: {:?}",
+        "should mention unknown tool, got: {:?}",
         text
     );
 }
 
 /// Contract 7: Missing required argument returns error
-/// When a client calls run_command without the command argument,
+/// When a client calls a profile tool without the command argument,
 /// Then the response indicates the error (isError or JSON-RPC error).
 #[test]
 fn mcp_missing_required_argument() {
@@ -89,8 +88,8 @@ fn mcp_missing_required_argument() {
     let mut client = mcp_common::McpClient::spawn(config.path());
     client.handshake();
 
-    // Act — call run_command with profile but no command
-    let response = client.call_tool("run_command", json!({"profile": "test"}));
+    // Act — call profile tool with no command argument
+    let response = client.call_tool("test", json!({}));
 
     // Assert — either isError in result or JSON-RPC error object
     let has_error = response["result"]["isError"] == true || response.get("error").is_some();
@@ -117,8 +116,8 @@ fn mcp_nonzero_exit_is_not_mcp_error() {
 
     // Act
     let response = client.call_tool(
-        "run_command",
-        json!({"profile": "test", "command": "exit 42"}),
+        "test",
+        json!({"command": "exit 42"}),
     );
 
     // Assert
@@ -137,35 +136,3 @@ fn mcp_nonzero_exit_is_not_mcp_error() {
     );
 }
 
-/// Contract 9: Auth check failure returns isError
-/// When a profile has an auth check that fails (check command exits non-zero),
-/// Then run_command returns isError: true with auth failure details.
-#[test]
-fn mcp_auth_failure_returns_error() {
-    // Arrange
-    let workspace = tempfile::tempdir().expect("create workspace");
-    let config = mcp_common::write_auth_fail_config(workspace.path().to_str().unwrap());
-    let mut client = mcp_common::McpClient::spawn(config.path());
-    client.handshake();
-
-    // Act
-    let response = client.call_tool(
-        "run_command",
-        json!({"profile": "auth-test", "command": "echo hello"}),
-    );
-
-    // Assert
-    let result = &response["result"];
-    assert_eq!(
-        result["isError"], true,
-        "auth failure should set isError, got: {:?}",
-        result
-    );
-
-    let text = mcp_common::get_content_text(result);
-    assert!(
-        text.to_lowercase().contains("auth") || text.to_lowercase().contains("inactive"),
-        "should mention auth failure, got: {:?}",
-        text
-    );
-}

@@ -4,7 +4,7 @@ use ostia_core::{CommandMatcher, OstiaConfig, Profile};
 
 use anyhow::{Context, Result};
 use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{ForkResult, Pid, close, dup2, execvp, fork, pipe, read};
+use nix::unistd::{ForkResult, Pid, close, dup2, execve, fork, pipe, read};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::{IntoRawFd, RawFd};
@@ -190,6 +190,14 @@ impl SandboxExecutor {
                 // Prevent destructors from running on the ptr::read copies.
                 std::mem::forget(binaries_vec);
 
+                // Set CWD to workspace if configured.
+                if let Some(ws) = self.profile.workspace.as_deref() {
+                    if nix::unistd::chdir(ws).is_err() {
+                        eprintln!("ostia: chdir to workspace failed: {}", ws.display());
+                        std::process::exit(125);
+                    }
+                }
+
                 // Apply Landlock filesystem restrictions (defense-in-depth).
                 // This constrains writes to the workspace only, even though the
                 // tmpfs root is technically writable after pivot_root.
@@ -208,7 +216,7 @@ impl SandboxExecutor {
                     std::process::exit(125);
                 }
 
-                // Exec /bin/sh -c "<command>".
+                // Exec /bin/sh -c "<command>" with explicit env (no parent inheritance).
                 let sh = CString::new("/bin/sh").unwrap();
                 let dash_c = CString::new("-c").unwrap();
                 let cmd = CString::new(command).unwrap_or_else(|_| {
@@ -218,10 +226,21 @@ impl SandboxExecutor {
                     CString::new("").unwrap()
                 });
 
-                // execvp never returns on success.
-                let _err = execvp(&sh, &[&sh, &dash_c, &cmd]);
+                // Build explicit env vector: baseline vars + profile env.
+                let mut env_vec: Vec<CString> = Vec::new();
+                env_vec.push(CString::new("PATH=/usr/bin:/bin").unwrap());
+                env_vec.push(CString::new("HOME=/").unwrap());
+                env_vec.push(CString::new("TERM=dumb").unwrap());
+                for (key, value) in &self.profile.env {
+                    if let Ok(entry) = CString::new(format!("{key}={value}")) {
+                        env_vec.push(entry);
+                    }
+                }
+
+                // execve never returns on success. Uses explicit env — no parent inheritance.
+                let _err = execve(&sh, &[&sh, &dash_c, &cmd], &env_vec);
                 // If we get here, exec failed.
-                eprintln!("ostia: execvp(/bin/sh) failed: {}", std::io::Error::last_os_error());
+                eprintln!("ostia: execve(/bin/sh) failed: {}", std::io::Error::last_os_error());
                 std::process::exit(127);
             }
 
@@ -257,23 +276,6 @@ impl SandboxExecutor {
                 allowed: false,
                 reason: Some(reason),
             });
-        }
-
-        // Step 1b: check auth status — fail before forking if any service is inactive.
-        if !self.profile.auth_checks.is_empty() {
-            let results = ostia_core::run_auth_checks(&self.profile.auth_checks);
-            let failed: Vec<_> = results.iter().filter(|r| !r.active).collect();
-            if !failed.is_empty() {
-                let names: Vec<_> = failed.iter().map(|r| r.service.as_str()).collect();
-                return Ok(ExecutionResult {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: -1,
-                    command: command.to_string(),
-                    allowed: false,
-                    reason: Some(format!("auth required: {} inactive", names.join(", "))),
-                });
-            }
         }
 
         // Step 2: fork the sandboxed child.
@@ -323,16 +325,6 @@ impl SandboxExecutor {
             let (tx, rx) = mpsc::channel();
             let _ = tx.send(StreamEvent::Exit(-1));
             return Ok(rx);
-        }
-
-        if !self.profile.auth_checks.is_empty() {
-            let results = ostia_core::run_auth_checks(&self.profile.auth_checks);
-            let failed: Vec<_> = results.iter().filter(|r| !r.active).collect();
-            if !failed.is_empty() {
-                let (tx, rx) = mpsc::channel();
-                let _ = tx.send(StreamEvent::Exit(-1));
-                return Ok(rx);
-            }
         }
 
         let (child, stdout_read, stderr_read) = self.fork_sandboxed(command)?;
@@ -460,7 +452,7 @@ mod tests {
                 deny_read_paths: vec![],
                 deny_write_paths: vec![],
                 network_allow: vec![],
-                auth_checks: vec![],
+                env: HashMap::new(),
             },
             matcher,
             resolved_binaries: HashMap::new(),

@@ -22,10 +22,14 @@ pub struct OstiaConfig {
     pub bundles: HashMap<String, Bundle>,
     #[serde(default)]
     pub profiles: HashMap<String, ProfileDef>,
+    #[serde(default)]
+    pub endpoints: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Bundle {
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub binaries: Vec<String>,
     #[serde(default)]
@@ -34,6 +38,8 @@ pub struct Bundle {
 
 #[derive(Debug, Deserialize)]
 pub struct ProfileDef {
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub bundles: Vec<String>,
     #[serde(default)]
@@ -45,12 +51,37 @@ pub struct ProfileDef {
     #[serde(default)]
     pub network: Option<NetworkDef>,
     #[serde(default)]
-    pub auth: BTreeMap<String, AuthCheckDef>,
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub credentials: BTreeMap<String, CredentialEntry>,
 }
 
+/// A credential entry: either a preset reference or a full provider definition.
 #[derive(Debug, Deserialize, Clone)]
-pub struct AuthCheckDef {
-    pub check: String,
+#[serde(untagged)]
+pub enum CredentialEntry {
+    /// Preset reference: `gcloud: preset`
+    Preset(String),
+    /// Full provider definition: `{ provider: command, command: "...", inject: { ... } }`
+    Custom(CredentialDef),
+}
+
+/// A credential provider definition in the config.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CredentialDef {
+    pub provider: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub env: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub inject: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,13 +109,6 @@ pub struct NetworkDef {
     pub allow: Vec<String>,
 }
 
-/// An auth check to run on the host before sandbox execution.
-#[derive(Debug, Clone)]
-pub struct AuthCheck {
-    pub service: String,
-    pub command: String,
-}
-
 /// A resolved profile ready for use by the sandbox engine.
 #[derive(Debug)]
 pub struct Profile {
@@ -97,7 +121,7 @@ pub struct Profile {
     pub deny_read_paths: Vec<PathBuf>,
     pub deny_write_paths: Vec<PathBuf>,
     pub network_allow: Vec<String>,
-    pub auth_checks: Vec<AuthCheck>,
+    pub env: HashMap<String, String>,
 }
 
 impl OstiaConfig {
@@ -108,6 +132,10 @@ impl OstiaConfig {
     }
 
     pub fn resolve_profile(&self, name: &str) -> anyhow::Result<Profile> {
+        self.resolve_profile_with_identity(name, None)
+    }
+
+    pub fn resolve_profile_with_identity(&self, name: &str, user_id: Option<&str>) -> anyhow::Result<Profile> {
         let profile_def = self
             .profiles
             .get(name)
@@ -152,14 +180,13 @@ impl OstiaConfig {
             .map(|n| n.allow.clone())
             .unwrap_or_default();
 
-        let auth_checks = profile_def
-            .auth
-            .iter()
-            .map(|(k, v)| AuthCheck {
-                service: k.clone(),
-                command: v.check.clone(),
-            })
-            .collect();
+        // Resolve credential entries (presets → full definitions), then fetch.
+        let mut env = profile_def.env.clone();
+        if !profile_def.credentials.is_empty() {
+            let resolved_creds = crate::credentials::resolve_entries(&profile_def.credentials)?;
+            let cred_env = crate::credentials::fetch_credentials(&resolved_creds, user_id)?;
+            env.extend(cred_env);
+        }
 
         Ok(Profile {
             name: name.to_string(),
@@ -171,8 +198,74 @@ impl OstiaConfig {
             deny_read_paths,
             deny_write_paths,
             network_allow,
-            auth_checks,
+            env,
         })
+    }
+
+    /// Build a curated tool description for a profile.
+    ///
+    /// Includes: profile description, featured bundle tools, notable denials,
+    /// and workspace path.
+    pub fn build_tool_description(&self, name: &str, profile_def: &ProfileDef) -> String {
+        let mut parts = Vec::new();
+
+        // Opening line: profile description or name
+        parts.push(
+            profile_def
+                .description
+                .clone()
+                .unwrap_or_else(|| name.to_string()),
+        );
+
+        // Featured tools: bundle descriptions (only bundles with description set)
+        let builtins = crate::builtins::builtin_bundles();
+        let featured: Vec<&str> = profile_def
+            .bundles
+            .iter()
+            .filter_map(|bundle_name| {
+                self.bundles
+                    .get(bundle_name)
+                    .or_else(|| builtins.get(bundle_name))
+                    .and_then(|b| b.description.as_deref())
+            })
+            .collect();
+        if !featured.is_empty() {
+            parts.push(format!("Tools: {}", featured.join(", ")));
+        }
+
+        // Notable denials: deny patterns whose binary is in the profile
+        let all_binaries: HashSet<String> = profile_def
+            .bundles
+            .iter()
+            .filter_map(|bundle_name| {
+                self.bundles
+                    .get(bundle_name)
+                    .or_else(|| builtins.get(bundle_name))
+            })
+            .flat_map(|b| b.binaries.iter().cloned())
+            .collect();
+
+        let notable: Vec<&str> = profile_def
+            .deny
+            .iter()
+            .filter(|pattern| {
+                let binary = pattern.split_whitespace().next().unwrap_or("");
+                all_binaries.contains(binary)
+            })
+            .map(|s| s.as_str())
+            .collect();
+        if !notable.is_empty() {
+            parts.push(format!("Denied: {}", notable.join(", ")));
+        }
+
+        // Workspace path
+        if let Some(fs) = &profile_def.filesystem {
+            if let Some(ws) = &fs.workspace {
+                parts.push(format!("Workspace: {}", ws));
+            }
+        }
+
+        parts.join("\n")
     }
 
     /// Resolve a profile from a token. In open mode (or no auth config), the

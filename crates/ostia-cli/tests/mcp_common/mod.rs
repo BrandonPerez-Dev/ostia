@@ -61,6 +61,65 @@ impl McpClient {
         }
     }
 
+    /// Spawn `ostia serve` with extra CLI args and optional env vars.
+    ///
+    /// Used for testing flags like `--user-id` or transport options.
+    pub fn spawn_with_args_and_env(
+        config_path: &Path,
+        extra_args: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> Self {
+        let mut cmd = Command::new(ostia_bin());
+        cmd.args(["serve", "--config", config_path.to_str().unwrap()])
+            .args(extra_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        for &(key, value) in extra_env {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn().expect("spawn ostia serve");
+
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+        Self {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        }
+    }
+
+    /// Spawn `ostia serve` with additional env vars set on the child process.
+    ///
+    /// Used to test that parent env vars do NOT leak into the sandbox.
+    pub fn spawn_with_env(config_path: &Path, extra_env: &[(&str, &str)]) -> Self {
+        let mut cmd = Command::new(ostia_bin());
+        cmd.args(["serve", "--config", config_path.to_str().unwrap()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        for &(key, value) in extra_env {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn().expect("spawn ostia serve");
+
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+        Self {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        }
+    }
+
     /// Send a JSON-RPC message (request or notification).
     pub fn send(&mut self, msg: &Value) {
         let line = serde_json::to_string(msg).expect("serialize JSON-RPC message");
@@ -187,28 +246,6 @@ profiles:
     f
 }
 
-/// Write a config with a profile that has a failing auth check.
-pub fn write_auth_fail_config(workspace: &str) -> tempfile::NamedTempFile {
-    let config = format!(
-        r#"bundles:
-  baseline:
-    binaries: [sh, bash, echo]
-
-profiles:
-  auth-test:
-    bundles: [baseline]
-    auth:
-      fake-service:
-        check: "false"
-    filesystem:
-      workspace: {workspace}
-"#
-    );
-    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
-    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
-    f
-}
-
 /// Write a config with two profiles for concurrent/multi-profile testing.
 /// - alpha: allows sh, bash, echo
 /// - beta: allows sh, bash, echo, cat
@@ -227,6 +264,69 @@ profiles:
       workspace: {workspace}
   beta:
     bundles: [beta-tools]
+    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
+    f
+}
+
+// ─── Env injection config writers (V0) ───
+
+/// Write a config with explicit env vars on the profile for testing
+/// sandbox env injection.
+pub fn write_env_injection_config(
+    workspace: &str,
+    env_vars: &[(&str, &str)],
+) -> tempfile::NamedTempFile {
+    let env_entries: Vec<String> = env_vars
+        .iter()
+        .map(|(k, v)| format!("      {k}: \"{v}\""))
+        .collect();
+    let env_block = if env_entries.is_empty() {
+        String::new()
+    } else {
+        format!("    env:\n{}\n", env_entries.join("\n"))
+    };
+
+    let config = format!(
+        r#"bundles:
+  baseline:
+    binaries: [sh, bash, echo, cat, ls]
+
+profiles:
+  test:
+    bundles: [baseline]
+{env_block}    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
+    f
+}
+
+// ─── Credential provider config writers (V1) ───
+
+/// Write a config with a credential provider block on the profile.
+///
+/// The `credentials_yaml` parameter is a raw YAML fragment (already indented
+/// at profile level) that gets spliced into the profile definition.
+pub fn write_credential_config(
+    workspace: &str,
+    credentials_yaml: &str,
+) -> tempfile::NamedTempFile {
+    let config = format!(
+        r#"bundles:
+  baseline:
+    binaries: [sh, bash, echo, cat, ls]
+
+profiles:
+  test:
+    bundles: [baseline]
+{credentials_yaml}
     filesystem:
       workspace: {workspace}
 "#
@@ -327,6 +427,131 @@ bundles:
 
 profiles:
   test:
+    bundles: [baseline]
+    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
+    f
+}
+
+// ─── Per-profile tool config writers (V10) ───
+
+/// Write a config with described bundles and profiles for testing
+/// dynamic per-profile MCP tools.
+/// - baseline bundle: no description (silent)
+/// - dev-tools bundle: has description (featured)
+/// - "test" profile: described, uses both bundles
+pub fn write_described_config(workspace: &str) -> tempfile::NamedTempFile {
+    let config = format!(
+        r#"bundles:
+  baseline:
+    binaries: [sh, bash, echo, cat, ls]
+  dev-tools:
+    description: "git, curl, jq"
+    binaries: [git, curl, jq]
+
+profiles:
+  test:
+    description: "Test development sandbox"
+    bundles: [baseline, dev-tools]
+    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
+    f
+}
+
+/// Write a config for testing that deny descriptions only show notable
+/// denials (binaries that are actually in the profile).
+/// - denies "rm *" (rm IS in baseline → notable, should appear)
+/// - denies "fakecmd *" (fakecmd is NOT in any bundle → non-notable, should be omitted)
+pub fn write_deny_filter_config(workspace: &str) -> tempfile::NamedTempFile {
+    let config = format!(
+        r#"bundles:
+  baseline:
+    binaries: [sh, bash, echo, cat, ls, rm]
+  dev-tools:
+    description: "git"
+    binaries: [git]
+
+profiles:
+  filtered:
+    description: "Deny filter test"
+    bundles: [baseline, dev-tools]
+    deny:
+      - "rm *"
+      - "fakecmd *"
+    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
+    f
+}
+
+/// Write a config with two profiles that have different deny rules,
+/// for testing that different profile tools enforce different restrictions.
+/// - "permissive": allows cat
+/// - "restrictive": denies cat
+pub fn write_diff_rules_config(workspace: &str) -> tempfile::NamedTempFile {
+    let config = format!(
+        r#"bundles:
+  baseline:
+    binaries: [sh, bash, echo, cat, ls]
+
+profiles:
+  permissive:
+    description: "Allows cat"
+    bundles: [baseline]
+    filesystem:
+      workspace: {workspace}
+  restrictive:
+    description: "Denies cat"
+    bundles: [baseline]
+    deny:
+      - "cat *"
+    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
+    f
+}
+
+/// Write a config with endpoint mappings for testing custom endpoints.
+/// - endpoint "group" maps to [alpha, beta]
+/// - profiles: alpha, beta, gamma (gamma not in any endpoint)
+pub fn write_endpoint_config(workspace: &str) -> tempfile::NamedTempFile {
+    let config = format!(
+        r#"bundles:
+  baseline:
+    binaries: [sh, bash, echo, cat, ls]
+
+endpoints:
+  group:
+    - alpha
+    - beta
+
+profiles:
+  alpha:
+    description: "Alpha profile"
+    bundles: [baseline]
+    filesystem:
+      workspace: {workspace}
+  beta:
+    description: "Beta profile"
+    bundles: [baseline]
+    filesystem:
+      workspace: {workspace}
+  gamma:
+    description: "Gamma profile"
     bundles: [baseline]
     filesystem:
       workspace: {workspace}

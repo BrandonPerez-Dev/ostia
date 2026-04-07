@@ -10,16 +10,18 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 struct McpServer {
     config: Arc<OstiaConfig>,
+    user_id: Option<String>,
 }
 
 impl McpServer {
-    fn new(config: OstiaConfig) -> Self {
+    fn new(config: OstiaConfig, user_id: Option<&str>) -> Self {
         Self {
             config: Arc::new(config),
+            user_id: user_id.map(|s| s.to_string()),
         }
     }
 
-    async fn handle_request(&self, request: &Value) -> Option<Value> {
+    async fn handle_request(&self, request: &Value, scope: Option<&[String]>) -> Option<Value> {
         let method = request["method"].as_str().unwrap_or("");
 
         // JSON-RPC 2.0: messages with an id are requests, without are notifications.
@@ -27,6 +29,8 @@ impl McpServer {
             Some(id) if !id.is_null() => id.clone(),
             _ => return None,
         };
+
+        let filter: Option<Vec<&str>> = scope.map(|s| s.iter().map(|p| p.as_str()).collect());
 
         match method {
             "initialize" => Some(jsonrpc_success(
@@ -37,49 +41,66 @@ impl McpServer {
                     "serverInfo": { "name": "ostia", "version": env!("CARGO_PKG_VERSION") }
                 }),
             )),
-            "tools/list" => Some(jsonrpc_success(&id, json!({ "tools": tools_schema() }))),
+            "tools/list" => Some(jsonrpc_success(
+                &id,
+                json!({ "tools": self.profile_tools_schema(filter.as_deref()) }),
+            )),
             "tools/call" => {
                 let params = &request["params"];
                 let name = params["name"].as_str().unwrap_or("");
                 let arguments = &params["arguments"];
-                let result = self.dispatch_tool(name, arguments).await;
+                let result = self.dispatch_tool(name, arguments, filter.as_deref()).await;
                 Some(jsonrpc_success(&id, result))
             }
             _ => Some(jsonrpc_error(&id, -32601, "Method not found")),
         }
     }
 
-    async fn dispatch_tool(&self, name: &str, arguments: &Value) -> Value {
-        match name {
-            "run_command" => {
-                let profile = match arguments["profile"].as_str() {
-                    Some(p) => p,
-                    None => return tool_error("missing required argument: profile"),
-                };
-                let command = match arguments["command"].as_str() {
-                    Some(c) => c,
-                    None => return tool_error("missing required argument: command"),
-                };
-                self.exec_run_command(profile, command).await
-            }
-            "list_commands" => {
-                let profile = match arguments["profile"].as_str() {
-                    Some(p) => p,
-                    None => return tool_error("missing required argument: profile"),
-                };
-                self.exec_list_commands(profile)
-            }
-            _ => tool_error(&format!("unknown tool: {}", name)),
+    /// Resolve an endpoint name to a list of profile names.
+    ///
+    /// Checks config.endpoints first (multi-profile grouping), then falls
+    /// back to a single profile name, then returns None.
+    fn resolve_endpoint(&self, name: &str) -> Option<Vec<String>> {
+        // Check configured endpoints first
+        if let Some(profiles) = self.config.endpoints.get(name) {
+            return Some(profiles.clone());
         }
+        // Fallback: treat name as a single profile
+        if self.config.profiles.contains_key(name) {
+            return Some(vec![name.to_string()]);
+        }
+        None
     }
 
-    async fn exec_run_command(&self, profile_name: &str, command: &str) -> Value {
+    async fn dispatch_tool(&self, name: &str, arguments: &Value, allowed_profiles: Option<&[&str]>) -> Value {
+        // Check if tool name matches a config profile
+        if !self.config.profiles.contains_key(name) {
+            return tool_error(&format!("unknown tool: {}", name));
+        }
+
+        // If scoped to specific profiles, check access
+        if let Some(allowed) = allowed_profiles {
+            if !allowed.contains(&name) {
+                return tool_error(&format!("tool '{}' is not available on this endpoint", name));
+            }
+        }
+
+        let command = match arguments["command"].as_str() {
+            Some(c) => c,
+            None => return tool_error("missing required argument: command"),
+        };
+
+        self.exec_in_profile(name, command).await
+    }
+
+    async fn exec_in_profile(&self, profile_name: &str, command: &str) -> Value {
         let config = self.config.clone();
         let profile_name = profile_name.to_string();
         let command = command.to_string();
+        let user_id = self.user_id.clone();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let profile = config.resolve_profile_from_token(&profile_name)?;
+            let profile = config.resolve_profile_with_identity(&profile_name, user_id.as_deref())?;
             let executor = SandboxExecutor::from_profile(profile)?;
             executor.execute(&command)
         })
@@ -107,22 +128,6 @@ impl McpServer {
             }
             Ok(Err(e)) => tool_error(&format!("{}", e)),
             Err(e) => tool_error(&format!("internal error: {}", e)),
-        }
-    }
-
-    fn exec_list_commands(&self, profile_name: &str) -> Value {
-        match self.config.resolve_profile_from_token(profile_name) {
-            Ok(profile) => {
-                let mut binaries: Vec<&String> = profile.binaries.iter().collect();
-                binaries.sort();
-                let text = binaries
-                    .iter()
-                    .map(|b| b.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                tool_success(&text)
-            }
-            Err(e) => tool_error(&format!("{}", e)),
         }
     }
 }
@@ -153,32 +158,42 @@ fn tool_error(text: &str) -> Value {
 
 // ─── Tool schema ───
 
-fn tools_schema() -> Value {
-    json!([
-        {
-            "name": "run_command",
-            "description": "Execute a command in a sandboxed environment",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile": { "type": "string", "description": "The security profile to use" },
-                    "command": { "type": "string", "description": "The shell command to execute" }
-                },
-                "required": ["profile", "command"]
+impl McpServer {
+    /// Generate tools/list schema dynamically from config profiles.
+    ///
+    /// If `filter` is Some, only include profiles in the given set.
+    /// If `filter` is None, include all profiles.
+    fn profile_tools_schema(&self, filter: Option<&[&str]>) -> Value {
+        let mut tools = Vec::new();
+        let mut profile_names: Vec<&String> = self.config.profiles.keys().collect();
+        profile_names.sort();
+
+        for name in profile_names {
+            if let Some(allowed) = filter {
+                if !allowed.contains(&name.as_str()) {
+                    continue;
+                }
             }
-        },
-        {
-            "name": "list_commands",
-            "description": "List available commands for a security profile",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile": { "type": "string", "description": "The security profile to query" }
-                },
-                "required": ["profile"]
-            }
+            let profile_def = &self.config.profiles[name];
+            let description = self.config.build_tool_description(name, profile_def);
+            tools.push(json!({
+                "name": name,
+                "description": description,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }));
         }
-    ])
+
+        json!(tools)
+    }
 }
 
 // ─── Stdio transport ───
@@ -194,7 +209,7 @@ async fn serve_stdio(server: Arc<McpServer>) -> anyhow::Result<()> {
             Err(_) => continue,
         };
 
-        if let Some(response) = server.handle_request(&request).await {
+        if let Some(response) = server.handle_request(&request, None).await {
             let out = serde_json::to_string(&response).unwrap();
             stdout.write_all(out.as_bytes()).await.ok();
             stdout.write_all(b"\n").await.ok();
@@ -223,7 +238,47 @@ async fn handle_http(
     };
 
     let response = server
-        .handle_request(&request)
+        .handle_request(&request, None)
+        .await
+        .unwrap_or_else(|| json!({}));
+    Json(response)
+}
+
+async fn handle_http_endpoint(
+    State(server): State<Arc<McpServer>>,
+    axum::extract::Path(endpoint_name): axum::extract::Path<String>,
+    body: String,
+) -> Json<Value> {
+    // Resolve endpoint to profile list
+    let scope = match server.resolve_endpoint(&endpoint_name) {
+        Some(profiles) => profiles,
+        None => {
+            // Extract request id for the error response
+            let id = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("id").cloned())
+                .unwrap_or(Value::Null);
+            return Json(jsonrpc_error(
+                &id,
+                -32001,
+                &format!("unknown endpoint: {}", endpoint_name),
+            ));
+        }
+    };
+
+    let request: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return Json(json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": { "code": -32700, "message": "Parse error" }
+            }));
+        }
+    };
+
+    let response = server
+        .handle_request(&request, Some(&scope))
         .await
         .unwrap_or_else(|| json!({}));
     Json(response)
@@ -232,6 +287,7 @@ async fn handle_http(
 async fn serve_http(server: Arc<McpServer>, host: &str, port: u16) -> anyhow::Result<()> {
     let app = axum::Router::new()
         .route("/mcp", axum::routing::post(handle_http))
+        .route("/mcp/{name}", axum::routing::post(handle_http_endpoint))
         .with_state(server);
 
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port)).await?;
@@ -246,9 +302,10 @@ pub async fn run_serve(
     transport: &str,
     host: &str,
     port: Option<u16>,
+    user_id: Option<&str>,
 ) -> anyhow::Result<()> {
     let config = OstiaConfig::load(config_path)?;
-    let server = Arc::new(McpServer::new(config));
+    let server = Arc::new(McpServer::new(config, user_id));
 
     match transport {
         "stdio" => serve_stdio(server).await,
