@@ -246,28 +246,6 @@ profiles:
     f
 }
 
-/// Write a config with a profile that has a failing auth check.
-pub fn write_auth_fail_config(workspace: &str) -> tempfile::NamedTempFile {
-    let config = format!(
-        r#"bundles:
-  baseline:
-    binaries: [sh, bash, echo]
-
-profiles:
-  auth-test:
-    bundles: [baseline]
-    auth:
-      fake-service:
-        check: "false"
-    filesystem:
-      workspace: {workspace}
-"#
-    );
-    let mut f = tempfile::NamedTempFile::new().expect("create temp config");
-    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
-    f
-}
-
 /// Write a config with two profiles for concurrent/multi-profile testing.
 /// - alpha: allows sh, bash, echo
 /// - beta: allows sh, bash, echo, cat

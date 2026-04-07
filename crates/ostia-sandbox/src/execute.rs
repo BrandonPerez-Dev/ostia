@@ -278,23 +278,6 @@ impl SandboxExecutor {
             });
         }
 
-        // Step 1b: check auth status — fail before forking if any service is inactive.
-        if !self.profile.auth_checks.is_empty() {
-            let results = ostia_core::run_auth_checks(&self.profile.auth_checks);
-            let failed: Vec<_> = results.iter().filter(|r| !r.active).collect();
-            if !failed.is_empty() {
-                let names: Vec<_> = failed.iter().map(|r| r.service.as_str()).collect();
-                return Ok(ExecutionResult {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: -1,
-                    command: command.to_string(),
-                    allowed: false,
-                    reason: Some(format!("auth required: {} inactive", names.join(", "))),
-                });
-            }
-        }
-
         // Step 2: fork the sandboxed child.
         let (child, stdout_read, stderr_read) = self.fork_sandboxed(command)?;
 
@@ -342,16 +325,6 @@ impl SandboxExecutor {
             let (tx, rx) = mpsc::channel();
             let _ = tx.send(StreamEvent::Exit(-1));
             return Ok(rx);
-        }
-
-        if !self.profile.auth_checks.is_empty() {
-            let results = ostia_core::run_auth_checks(&self.profile.auth_checks);
-            let failed: Vec<_> = results.iter().filter(|r| !r.active).collect();
-            if !failed.is_empty() {
-                let (tx, rx) = mpsc::channel();
-                let _ = tx.send(StreamEvent::Exit(-1));
-                return Ok(rx);
-            }
         }
 
         let (child, stdout_read, stderr_read) = self.fork_sandboxed(command)?;
@@ -479,7 +452,6 @@ mod tests {
                 deny_read_paths: vec![],
                 deny_write_paths: vec![],
                 network_allow: vec![],
-                auth_checks: vec![],
                 env: HashMap::new(),
             },
             matcher,

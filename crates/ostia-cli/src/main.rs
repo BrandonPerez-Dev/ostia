@@ -193,16 +193,5 @@ fn check_command(config_path: &PathBuf, profile_name: &str) -> ExitCode {
         println!();
     }
 
-    // Show auth status if any checks are configured
-    if !profile.auth_checks.is_empty() {
-        println!("Auth:");
-        let results = ostia_core::run_auth_checks(&profile.auth_checks);
-        for result in &results {
-            let status = if result.active { "active" } else { "inactive" };
-            println!("  [{}] {}", status, result.service);
-        }
-        println!();
-    }
-
     ExitCode::SUCCESS
 }

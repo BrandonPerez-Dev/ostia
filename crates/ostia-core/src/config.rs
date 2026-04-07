@@ -51,16 +51,9 @@ pub struct ProfileDef {
     #[serde(default)]
     pub network: Option<NetworkDef>,
     #[serde(default)]
-    pub auth: BTreeMap<String, AuthCheckDef>,
-    #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub credentials: BTreeMap<String, CredentialEntry>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct AuthCheckDef {
-    pub check: String,
 }
 
 /// A credential entry: either a preset reference or a full provider definition.
@@ -116,13 +109,6 @@ pub struct NetworkDef {
     pub allow: Vec<String>,
 }
 
-/// An auth check to run on the host before sandbox execution.
-#[derive(Debug, Clone)]
-pub struct AuthCheck {
-    pub service: String,
-    pub command: String,
-}
-
 /// A resolved profile ready for use by the sandbox engine.
 #[derive(Debug)]
 pub struct Profile {
@@ -135,7 +121,6 @@ pub struct Profile {
     pub deny_read_paths: Vec<PathBuf>,
     pub deny_write_paths: Vec<PathBuf>,
     pub network_allow: Vec<String>,
-    pub auth_checks: Vec<AuthCheck>,
     pub env: HashMap<String, String>,
 }
 
@@ -195,15 +180,6 @@ impl OstiaConfig {
             .map(|n| n.allow.clone())
             .unwrap_or_default();
 
-        let auth_checks = profile_def
-            .auth
-            .iter()
-            .map(|(k, v)| AuthCheck {
-                service: k.clone(),
-                command: v.check.clone(),
-            })
-            .collect();
-
         // Resolve credential entries (presets → full definitions), then fetch.
         let mut env = profile_def.env.clone();
         if !profile_def.credentials.is_empty() {
@@ -222,7 +198,6 @@ impl OstiaConfig {
             deny_read_paths,
             deny_write_paths,
             network_allow,
-            auth_checks,
             env,
         })
     }

@@ -1,7 +1,7 @@
 //! Integration tests: MCP error handling (V7, Slice 2).
 //!
 //! Validates that the MCP server returns correct errors for denied commands,
-//! invalid profiles, missing arguments, non-zero exit codes, and auth failures.
+//! invalid profiles, missing arguments, and non-zero exit codes.
 
 mod mcp_common;
 
@@ -136,35 +136,3 @@ fn mcp_nonzero_exit_is_not_mcp_error() {
     );
 }
 
-/// Contract 9: Auth check failure returns isError
-/// When a profile has an auth check that fails (check command exits non-zero),
-/// Then calling the profile tool returns isError: true with auth failure details.
-#[test]
-fn mcp_auth_failure_returns_error() {
-    // Arrange
-    let workspace = tempfile::tempdir().expect("create workspace");
-    let config = mcp_common::write_auth_fail_config(workspace.path().to_str().unwrap());
-    let mut client = mcp_common::McpClient::spawn(config.path());
-    client.handshake();
-
-    // Act
-    let response = client.call_tool(
-        "auth-test",
-        json!({"command": "echo hello"}),
-    );
-
-    // Assert
-    let result = &response["result"];
-    assert_eq!(
-        result["isError"], true,
-        "auth failure should set isError, got: {:?}",
-        result
-    );
-
-    let text = mcp_common::get_content_text(result);
-    assert!(
-        text.to_lowercase().contains("auth") || text.to_lowercase().contains("inactive"),
-        "should mention auth failure, got: {:?}",
-        text
-    );
-}

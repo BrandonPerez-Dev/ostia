@@ -36,7 +36,6 @@ fn build_test_executor(
         deny_read_paths: vec![],
         deny_write_paths: vec![],
         network_allow: vec![],
-        auth_checks: vec![],
         env: std::collections::HashMap::new(),
     };
 
