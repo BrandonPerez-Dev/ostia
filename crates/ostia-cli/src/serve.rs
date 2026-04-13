@@ -38,7 +38,8 @@ impl McpServer {
                 json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "ostia", "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": "ostia", "version": env!("CARGO_PKG_VERSION") },
+                    "instructions": self.build_server_instructions(filter.as_deref()),
                 }),
             )),
             "tools/list" => Some(jsonrpc_success(
@@ -154,6 +155,68 @@ fn tool_success(text: &str) -> Value {
 
 fn tool_error(text: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": true })
+}
+
+// ─── Server instructions ───
+
+impl McpServer {
+    /// Build the MCP `initialize.instructions` string.
+    ///
+    /// Dynamic: lists the profiles visible to this client (scope-aware when
+    /// mounted at `/mcp/{endpoint}`). The preamble is static prose that
+    /// explains the profile-as-sandbox model and nudges the agent to inspect
+    /// profile tools before assuming a CLI is unavailable.
+    fn build_server_instructions(&self, scope: Option<&[&str]>) -> String {
+        let preamble = "\
+ostia exposes sandboxed shell environments as MCP tools. Each tool in tools/list \
+is a *profile* — a curated set of allowed binaries, filesystem scope, network \
+rules, and pre-injected credentials. Calling a profile tool with a `command` \
+argument runs that command inside the profile's sandbox and returns \
+stdout/stderr.
+
+Before concluding you can't do something, inspect the available profile tools. \
+Profiles commonly bundle CLIs that aren't otherwise available to you, \
+pre-authenticated via the profile's credential configuration — so \
+domain-specific tools (cloud SDKs, SaaS clients, internal utilities) may \
+already be ready to use without extra setup. Read each profile's description \
+to see what it's for.
+
+The `command` argument accepts POSIX shell syntax: pipes, redirects, command \
+substitution, and `&&`/`||` chains. Each call runs in a fresh subprocess, so \
+shell state (cwd, exported variables) does not persist between calls — combine \
+operations within a single command when they need to share state.";
+
+        let mut names: Vec<&String> = self.config.profiles.keys().collect();
+        names.sort();
+        let visible: Vec<&String> = names
+            .into_iter()
+            .filter(|n| match scope {
+                Some(allowed) => allowed.contains(&n.as_str()),
+                None => true,
+            })
+            .collect();
+
+        let mut out = String::with_capacity(preamble.len() + 256);
+        out.push_str(preamble);
+        out.push_str("\n\n");
+
+        if visible.is_empty() {
+            out.push_str("No profiles are available in this scope.");
+        } else {
+            out.push_str(&format!("Available profiles ({}):\n", visible.len()));
+            for name in visible {
+                let desc = self
+                    .config
+                    .profiles
+                    .get(name)
+                    .and_then(|p| p.description.as_deref())
+                    .unwrap_or(name);
+                out.push_str(&format!("  - {}: {}\n", name, desc));
+            }
+        }
+
+        out
+    }
 }
 
 // ─── Tool schema ───
