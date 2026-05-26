@@ -1,5 +1,5 @@
 ---
-status: planned
+status: built
 depends_on: [profiles.md, mcp-server.md]
 ---
 
@@ -238,3 +238,4 @@ Postgres provider (`crates/ostia-cli/tests/profile_source_postgres.rs`):
 ## Changes
 - 006 (2026-05-25) — initial creation. Slice 1 of `changes/006-profile-source-providers/`.
 - 006 (2026-05-26) — test-writer landed red integration tests for C-PS1–C-PS15 across three test files; spec `## Tests` section filled in with forward pointers. C-PS1 is green (backwards-compat contract); the other 14 are red until build implements the providers.
+- 006 (2026-05-26) — build landed V0a (`ProfileSource` trait + `FileProfileSource` + bootstrap-config wiring in `serve.rs`) and V0b (`HttpProfileSource` via reqwest+rustls, `PostgresProfileSource` via tokio-postgres). All 15 contracts green; status flipped to `built`. Pre-existing test suite verified non-regressing.

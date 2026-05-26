@@ -9,7 +9,7 @@ This directory holds the current behavioral contracts — the observable surface
 | Capability | File | Scope |
 |---|---|---|
 | **Profiles** | [profiles.md](profiles.md) | YAML config schema, profile + bundle composition, built-in bundles, graceful degradation |
-| **Profile Source** *(planned)* | [profile-source.md](profile-source.md) | Pluggable source providers (file / http / postgres) for loading bundles + profiles at startup. AuthSource shared abstraction. |
+| **Profile Source** | [profile-source.md](profile-source.md) | Pluggable source providers (file / http / postgres) for loading bundles + profiles at startup. AuthSource shared abstraction. |
 | **Sandbox** | [sandbox.md](sandbox.md) | Mount namespace binary allowlisting, subcommand matching, Landlock filesystem enforcement, seccomp syscall filtering, streaming execution |
 | **Credentials** | [credentials.md](credentials.md) | Credential provider types (command/env/file/http), identity resolution, inject mapping, `execve` env model |
 | **MCP Server** | [mcp-server.md](mcp-server.md) | stdio + HTTP transports, initialize handshake (+instructions), tools/list, tools/call, endpoint routing |
