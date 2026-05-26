@@ -115,6 +115,7 @@ The profiles capability has no direct integration tests — profile loading and 
 - **Profile lock is session-wide.** Once `ostia serve` starts with a profile, no JSON-RPC call can switch to a different profile. Profile is derived from tool name in MCP mode, and locked via CLI flag in `ostia run` mode.
 - **Mandatory deny paths cannot be overridden.** `~/.ssh`, `~/.aws`, `~/.config`, `.env`, `.git/hooks`, `.bashrc`, `.zshrc` are denied regardless of profile `read:` or `workspace:` configuration. (See sandbox.md C-S4 for the tested subset.)
 - **`auth:` section was removed in V5 of credentials migration.** The credential provider framework (`credentials:`) replaces it. See `spec/credentials.md`.
+- **Backwards-compatible source loading.** A `--config` YAML that was valid before Slice 1 of `changes/006-profile-source-providers/` landed must continue to parse and behave identically — implicit default is the `file` provider, bundles + profiles inline. See `spec/profile-source.md` for the broader contract.
 
 ## Non-goals
 

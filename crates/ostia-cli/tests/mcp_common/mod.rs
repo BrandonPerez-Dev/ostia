@@ -525,6 +525,116 @@ profiles:
     f
 }
 
+// ─── Profile-source bootstrap config helpers (V11) ───
+
+/// Write a bootstrap `--config` YAML containing only a `profile_source:` block.
+///
+/// `profile_source_yaml` is the indented YAML to splice as the value of the
+/// `profile_source:` key — e.g.,
+/// ```yaml
+///   provider: file
+///   path: /tmp/external.yaml
+/// ```
+/// The bootstrap file has no `bundles:` or `profiles:` at top level — the
+/// source provides them. Use [`write_bootstrap_with_inline_decoy`] if a test
+/// needs to verify the inline block is ignored.
+pub fn write_bootstrap_with_profile_source(profile_source_yaml: &str) -> tempfile::NamedTempFile {
+    let config = format!("profile_source:\n{profile_source_yaml}\n");
+    let mut f = tempfile::NamedTempFile::new().expect("create bootstrap config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write bootstrap config");
+    f
+}
+
+/// Write a bootstrap config that has BOTH a `profile_source:` block and a
+/// top-level inline `profiles:` block named `decoy`. Used to verify the
+/// source's data wins when both are present (C-PS3).
+pub fn write_bootstrap_with_inline_decoy(
+    profile_source_yaml: &str,
+    workspace: &str,
+) -> tempfile::NamedTempFile {
+    let config = format!(
+        r#"profile_source:
+{profile_source_yaml}
+
+bundles:
+  decoy-tools:
+    binaries: [sh, bash, echo]
+
+profiles:
+  decoy:
+    bundles: [decoy-tools]
+    filesystem:
+      workspace: {workspace}
+"#
+    );
+    let mut f = tempfile::NamedTempFile::new().expect("create bootstrap config");
+    std::io::Write::write_all(&mut f, config.as_bytes()).expect("write bootstrap config");
+    f
+}
+
+/// Outcome of attempting to spawn `ostia serve` with stdio transport.
+///
+/// `Ready` means the process is alive and presumed waiting for JSON-RPC.
+/// `ExitedEarly` means it exited within the polling window with captured stderr.
+pub enum StdioStartupOutcome {
+    Ready(McpClient),
+    ExitedEarly {
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+}
+
+/// Spawn `ostia serve --config <path>` and watch whether it stays alive.
+///
+/// Polls `try_wait` for up to ~5 seconds. If the process exits in that
+/// window, returns `ExitedEarly` with captured stderr. Otherwise constructs
+/// an [`McpClient`] and returns `Ready`. Used for testing startup-failure
+/// scenarios where the test needs to assert exit_code + stderr message.
+pub fn spawn_or_capture_startup_failure(
+    config_path: &Path,
+    extra_env: &[(&str, &str)],
+) -> StdioStartupOutcome {
+    let mut cmd = Command::new(ostia_bin());
+    cmd.args(["serve", "--config", config_path.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    for &(key, value) in extra_env {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd.spawn().expect("spawn ostia serve");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait().expect("wait for child") {
+            Some(status) => {
+                let mut stderr = String::new();
+                if let Some(mut s) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = s.read_to_string(&mut stderr);
+                }
+                return StdioStartupOutcome::ExitedEarly { status, stderr };
+            }
+            None => {
+                if std::time::Instant::now() > deadline {
+                    // Server is still alive — treat as Ready and return a client
+                    let stdin = child.stdin.take().expect("stdin");
+                    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+                    return StdioStartupOutcome::Ready(McpClient {
+                        child,
+                        stdin,
+                        stdout,
+                        next_id: 1,
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 /// Write a config with endpoint mappings for testing custom endpoints.
 /// - endpoint "group" maps to [alpha, beta]
 /// - profiles: alpha, beta, gamma (gamma not in any endpoint)
