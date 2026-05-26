@@ -1653,13 +1653,16 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "async-trait",
  "base64",
  "glob",
+ "secrecy",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror",
+ "tokio",
  "ureq",
 ]
 
@@ -2189,6 +2192,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "serde",
+ "zeroize",
 ]
 
 [[package]]

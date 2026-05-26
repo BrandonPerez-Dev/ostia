@@ -24,6 +24,12 @@ pub struct OstiaConfig {
     pub profiles: HashMap<String, ProfileDef>,
     #[serde(default)]
     pub endpoints: HashMap<String, Vec<String>>,
+    /// Optional profile-source block. When present, `bundles` and `profiles`
+    /// loaded from the source override whatever is inline in this file. When
+    /// absent, the inline `bundles` and `profiles` are authoritative (today's
+    /// behavior). See `spec/profile-source.md`.
+    #[serde(default)]
+    pub profile_source: Option<crate::source::ProfileSourceDef>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -125,9 +131,43 @@ pub struct Profile {
 }
 
 impl OstiaConfig {
+    /// Synchronous loader. Parses the bootstrap YAML at `path` into an
+    /// `OstiaConfig`. Does NOT dispatch the `profile_source` block — when
+    /// `profile_source` is present, the resulting `OstiaConfig` will have
+    /// the parsed source-def attached but `bundles` and `profiles` will be
+    /// whatever was inline in the file (which is typically empty in a
+    /// production bootstrap).
+    ///
+    /// Use this for `ostia run` and `ostia check` (legacy dev-loop tools).
+    /// For `ostia serve`, use `load_resolved` instead so the source's data
+    /// actually populates `bundles` and `profiles`.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         let config: OstiaConfig = serde_yaml::from_str(&contents)?;
+        Ok(config)
+    }
+
+    /// Async loader that dispatches the configured `profile_source`. When the
+    /// source returns successfully, its `bundles` and `profiles` REPLACE
+    /// whatever was inline in the bootstrap config. `endpoints`, `auth`, and
+    /// `profile_source` from the bootstrap are preserved.
+    ///
+    /// Returns an error if the source can't be reached or returns invalid
+    /// content. Callers (typically `serve.rs:run_serve`) should let this
+    /// error propagate — it indicates startup should fail loudly.
+    pub async fn load_resolved(path: &Path) -> anyhow::Result<Self> {
+        let mut config = Self::load(path)?;
+        if let Some(source_def) = config.profile_source.clone() {
+            let source = source_def.build()?;
+            let sourced = source.load().await?;
+            if !config.profiles.is_empty() || !config.bundles.is_empty() {
+                eprintln!(
+                    "warning: inline `bundles:` / `profiles:` in bootstrap config are ignored when `profile_source:` is set"
+                );
+            }
+            config.bundles = sourced.bundles;
+            config.profiles = sourced.profiles;
+        }
         Ok(config)
     }
 

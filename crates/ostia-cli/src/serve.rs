@@ -367,7 +367,13 @@ pub async fn run_serve(
     port: Option<u16>,
     user_id: Option<&str>,
 ) -> anyhow::Result<()> {
-    let config = OstiaConfig::load(config_path)?;
+    // Use the source-resolving loader so `profile_source:` blocks in the
+    // bootstrap YAML actually dispatch and populate bundles + profiles.
+    // Errors here (unreachable source, bad response, auth failure) propagate
+    // up to `main()` which exits non-zero with the message prefixed `error:`.
+    let config = OstiaConfig::load_resolved(config_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("profile source: {}", e))?;
     let server = Arc::new(McpServer::new(config, user_id));
 
     match transport {
