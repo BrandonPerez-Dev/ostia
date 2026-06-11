@@ -5,9 +5,11 @@
 //! Three providers ship in Slice 1: `file`, `http`, `postgres`. The trait
 //! is async because two of the three are network-bound.
 
+pub mod cached;
 pub mod file;
 pub mod http;
 pub mod postgres;
 pub mod profile;
 
+pub use cached::{BinaryDiff, CachedProfileSource, RefreshOutcome};
 pub use profile::{AuthSource, AuthSourceDef, ProfileSource, ProfileSourceDef, SourcedConfig};

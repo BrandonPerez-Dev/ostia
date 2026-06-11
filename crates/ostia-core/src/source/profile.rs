@@ -1,12 +1,19 @@
 //! Profile-source trait, auth-source enum, and bootstrap-config types.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::config::{Bundle, ProfileDef};
+
+/// Default cache TTL applied when a `cache_ttl:` field is absent from
+/// `profile_source:`. See `spec/profile-source.md` Slice 2.
+pub fn default_cache_ttl() -> Duration {
+    Duration::from_secs(30)
+}
 
 /// Parsed bundles + profiles returned by a source's `load()` call.
 ///
@@ -157,6 +164,8 @@ pub struct FileSourceDef {
     pub path: String,
     #[serde(default)]
     pub auth: AuthSourceDef,
+    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    pub cache_ttl: Duration,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -164,6 +173,8 @@ pub struct HttpSourceDef {
     pub url: String,
     #[serde(default)]
     pub auth: AuthSourceDef,
+    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    pub cache_ttl: Duration,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -171,6 +182,8 @@ pub struct PostgresSourceDef {
     pub dsn: String,
     #[serde(default)]
     pub auth: AuthSourceDef,
+    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    pub cache_ttl: Duration,
 }
 
 impl ProfileSourceDef {
@@ -186,6 +199,16 @@ impl ProfileSourceDef {
             ProfileSourceDef::Postgres(def) => Ok(Box::new(
                 super::postgres::PostgresProfileSource::new(def.clone())?,
             )),
+        }
+    }
+
+    /// TTL for the in-process cache that backs this source. Set per-source in
+    /// the bootstrap config; defaults to 30s when unset.
+    pub fn cache_ttl(&self) -> Duration {
+        match self {
+            ProfileSourceDef::File(d) => d.cache_ttl,
+            ProfileSourceDef::Http(d) => d.cache_ttl,
+            ProfileSourceDef::Postgres(d) => d.cache_ttl,
         }
     }
 }

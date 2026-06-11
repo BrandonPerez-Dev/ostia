@@ -42,7 +42,7 @@ pub struct Bundle {
     pub subcommands: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ProfileDef {
     #[serde(default)]
     pub description: Option<String>,
@@ -90,7 +90,7 @@ pub struct CredentialDef {
     pub inject: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ToolsDef {
     #[serde(default)]
     pub binaries: Vec<String>,
@@ -98,7 +98,7 @@ pub struct ToolsDef {
     pub subcommands: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct FilesystemDef {
     pub workspace: Option<String>,
     #[serde(default)]
@@ -109,7 +109,7 @@ pub struct FilesystemDef {
     pub deny_write: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct NetworkDef {
     #[serde(default)]
     pub allow: Vec<String>,
@@ -155,9 +155,24 @@ impl OstiaConfig {
     /// Returns an error if the source can't be reached or returns invalid
     /// content. Callers (typically `serve.rs:run_serve`) should let this
     /// error propagate — it indicates startup should fail loudly.
+    ///
+    /// Use [`OstiaConfig::load_resolved_with_cache`] when the caller needs
+    /// the cached source handle for live refresh (Slice 2). This entry point
+    /// is kept for callers that only need a one-shot load.
     pub async fn load_resolved(path: &Path) -> anyhow::Result<Self> {
+        let (config, _) = Self::load_resolved_with_cache(path).await?;
+        Ok(config)
+    }
+
+    /// Same as [`OstiaConfig::load_resolved`] but ALSO returns the cached
+    /// source handle so callers can drive live refresh after startup. The
+    /// returned cache is primed with the initial load's data so the first
+    /// post-startup refresh check is a no-op until TTL expires.
+    pub async fn load_resolved_with_cache(
+        path: &Path,
+    ) -> anyhow::Result<(Self, Option<std::sync::Arc<crate::source::CachedProfileSource>>)> {
         let mut config = Self::load(path)?;
-        if let Some(source_def) = config.profile_source.clone() {
+        let cache = if let Some(source_def) = config.profile_source.clone() {
             let source = source_def.build()?;
             let sourced = source.load().await?;
             if !config.profiles.is_empty() || !config.bundles.is_empty() {
@@ -165,10 +180,16 @@ impl OstiaConfig {
                     "warning: inline `bundles:` / `profiles:` in bootstrap config are ignored when `profile_source:` is set"
                 );
             }
-            config.bundles = sourced.bundles;
-            config.profiles = sourced.profiles;
-        }
-        Ok(config)
+            config.bundles = sourced.bundles.clone();
+            config.profiles = sourced.profiles.clone();
+
+            let cached = crate::source::CachedProfileSource::new(source, source_def.cache_ttl());
+            cached.prime(&sourced).await;
+            Some(cached)
+        } else {
+            None
+        };
+        Ok((config, cache))
     }
 
     pub fn resolve_profile(&self, name: &str) -> anyhow::Result<Profile> {
