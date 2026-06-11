@@ -12,12 +12,12 @@ The shape mirrors the existing credential-provider pattern (`command | env | fil
 
 ## Spec changes
 
-- `spec/profile-source.md` (new) — Slice 1. Provider trait for loading profile config. Implementations: `file`, `http`, `postgres`. Auth shape (`AuthSource` enum) lives here.
-- `spec/profile-source.md` (extended) — Slice 2. Refresh semantics: TTL polling, `postgres` LISTEN/NOTIFY, `http` etag conditional GET.
-- `spec/binary-source.md` (new) — Slice 3. Provider trait for fetching CLI binary tarballs into a local content-addressed cache. Eager pull at startup. Bind-mount path always points at the cache, never the network. Perf contract: warm-cache binary readiness < 10ms per tool call.
-- `spec/profile-registration.md` (new) — Slice 4. Hot registration: a new profile added to the source triggers binary pull without restart.
-- `spec/profiles.md` (modified) — Add backwards-compat invariant. Document the new optional top-level `profile_source:` key. The inline form remains valid and is the implicit default.
-- `spec/cli.md` (modified) — No new flag in Slice 1. `--config` stays as the single entry point. Later slices may add observability/admin surfaces but not config-source flags.
+- `spec/profile-source.md` (new) — Slice 1. Provider trait for loading profile config. Implementations: `file`, `http`, `postgres`. Auth shape (`AuthSource` enum) lives here. **Status: built (V0a `c1b6ca9` + V0b `d7c96df`).**
+- `spec/profile-source.md` (extended) — Slice 2. **Live profile resolution with TTL cache** (re-slicing 2026-05-26 after user discussion — replaces the original "periodic refresh" framing). `tools/list` and `tools/call` consult an in-process cache; cache miss → source fetch. Default TTL 30s, configurable via `cache_ttl:` on `profile_source:`. Source data diffs (binary set added/removed) are emitted as events for Slice 3 to consume. Initial load remains fail-closed; refresh failures are fail-open with the last-good config + loud logging. **No binary work in this slice** — binaries still come from the container image as today.
+- `spec/binary-source.md` (new) — Slice 3. Binary cache + on-demand fetch. `BinarySource` trait (file/http/s3, mirroring profile-source). Single-binary upload path for statically-linked CLIs (no extraction); tarball path (`.tar.zst` recommended) for dynamically-linked CLIs with bundled libs. Cache at `/var/lib/ostia/binaries/<sha>/<name>`. Consumes Slice 2's diff events to pull added binaries in the background. Perf contract: warm-cache binary readiness < 10ms per tool call; cold-cache blocks the call until binary is staged (worst-case ~10s for a 50MB tarball, acceptable).
+- `spec/profile-registration.md` — **Dissolved into Slices 2+3** after re-slicing. "Hot registration" (new profile in source → background binary pull without restart) emerges naturally from Slice 2's diff detection + Slice 3's on-demand fetch. No separate spec.
+- `spec/profiles.md` (modified) — Backwards-compat invariant landed in Slice 1. No further changes planned.
+- `spec/cli.md` (modified) — No new flag in any slice. `--config` stays as the single entry point.
 
 ## Context changes
 

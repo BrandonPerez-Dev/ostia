@@ -572,6 +572,179 @@ profiles:
     f
 }
 
+// ─── Slice 2 helpers: counted/stateful mock servers + stderr capture ───
+
+/// Start a multi-request mock HTTP server that returns the same body to every
+/// incoming GET. Returns `(port, request_counter)`. The counter is an
+/// `Arc<AtomicUsize>` the test can read after issuing calls to assert how many
+/// times ostia actually fetched the source.
+///
+/// The server thread loops on `accept()` and exits when the listener drops.
+/// In tests, hold the returned counter (the listener lives in the thread but
+/// goes away when the thread does — drop the counter binding to stop it
+/// gracefully isn't necessary because tests exit on completion).
+pub fn start_counted_mock_server(
+    body: String,
+    content_type: &'static str,
+) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind counted mock server");
+    let port = listener.local_addr().unwrap().port();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_for_thread = Arc::clone(&counter);
+
+    std::thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else {
+                break;
+            };
+            counter_for_thread.fetch_add(1, Ordering::SeqCst);
+
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    (port, counter)
+}
+
+/// Mutable response body + status for the stateful mock server.
+#[derive(Clone)]
+pub struct MockResponseState {
+    inner: std::sync::Arc<std::sync::Mutex<MockResponseInner>>,
+}
+
+struct MockResponseInner {
+    body: String,
+    status: u16,
+    content_type: String,
+}
+
+impl MockResponseState {
+    /// Update the response the mock returns to subsequent requests.
+    pub fn set(&self, body: String, status: u16, content_type: &str) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.body = body;
+        guard.status = status;
+        guard.content_type = content_type.to_string();
+    }
+}
+
+/// Start a stateful mock HTTP server whose response can be changed mid-test.
+/// Returns `(port, state)`. The test calls `state.set(...)` to flip the
+/// response between requests. Used by C-PS17 (cache expiry) and C-PS21
+/// (refresh failure) — both need different response data across requests.
+pub fn start_stateful_mock_server(
+    initial_body: String,
+    initial_content_type: &str,
+) -> (u16, MockResponseState) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stateful mock server");
+    let port = listener.local_addr().unwrap().port();
+
+    let inner = Arc::new(Mutex::new(MockResponseInner {
+        body: initial_body,
+        status: 200,
+        content_type: initial_content_type.to_string(),
+    }));
+    let state = MockResponseState {
+        inner: Arc::clone(&inner),
+    };
+
+    std::thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else {
+                break;
+            };
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+
+            let (body, status, content_type) = {
+                let guard = inner.lock().unwrap();
+                (guard.body.clone(), guard.status, guard.content_type.clone())
+            };
+
+            let response = format!(
+                "HTTP/1.1 {status} STATUS\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    (port, state)
+}
+
+/// Spawn `ostia serve` like `McpClient::spawn`, but ALSO drain stderr into a
+/// shared buffer in a background thread. Returns `(client, stderr_buffer)`.
+/// Tests use this when they need to assert on warnings written to stderr while
+/// the server continues running (e.g., C-PS21 fail-open with loud warning).
+pub fn spawn_with_stderr_capture(
+    config_path: &Path,
+    extra_args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> (McpClient, std::sync::Arc<std::sync::Mutex<String>>) {
+    let mut cmd = Command::new(ostia_bin());
+    cmd.args(["serve", "--config", config_path.to_str().unwrap()])
+        .args(extra_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    for &(key, value) in extra_env {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd.spawn().expect("spawn ostia serve");
+
+    let stdin = child.stdin.take().expect("stdin");
+    let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let stderr_pipe = child.stderr.take().expect("stderr");
+
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let buffer_for_thread = std::sync::Arc::clone(&buffer);
+
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut buf = [0u8; 4096];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if let Ok(mut guard) = buffer_for_thread.lock() {
+                        guard.push_str(&chunk);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let client = McpClient {
+        child,
+        stdin,
+        stdout,
+        next_id: 1,
+    };
+
+    (client, buffer)
+}
+
 /// Outcome of attempting to spawn `ostia serve` with stdio transport.
 ///
 /// `Ready` means the process is alive and presumed waiting for JSON-RPC.

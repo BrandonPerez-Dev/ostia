@@ -1,5 +1,5 @@
 ---
-status: built
+status: in-progress
 depends_on: [profiles.md, mcp-server.md]
 ---
 
@@ -53,6 +53,11 @@ profile_source:
     bearer_env: CONFIG_API_TOKEN          # for static_secret in http
     cert_path: /etc/ostia/client.pem      # for tls_identity
     key_path: /etc/ostia/client.key       # for tls_identity
+  cache_ttl: 30s                          # Slice 2 — optional, default 30s.
+                                          # Humantime-formatted duration (`30s`, `1m`,
+                                          # `5m`). After this window expires, the next
+                                          # `tools/list` or `tools/call` triggers a
+                                          # source refresh.
 
 endpoints: { ... }                        # always local — deployment shape
 auth: { ... }                             # always local — server-level mode
@@ -184,7 +189,54 @@ CREATE TABLE profiles (
 - **Action:** Same shape.
 - **Expected:** Same shape. Proves Postgres-sourced data reaches the real sandbox.
 
+## Test contracts — Slice 2 (live resolution + TTL cache)
+
+### C-PS16: Cache hit within TTL prevents source refetch
+- **Test:** `http_source_within_ttl_does_not_refetch` in `crates/ostia-cli/tests/profile_source_refresh.rs`
+- **Setup:** Mock HTTP server backed by a request counter (new helper `start_counted_mock_server`) that records every incoming GET. Bootstrap config: `profile_source: { provider: http, url: ..., cache_ttl: 10s, auth: { type: none } }`. 10s is well above the wall-clock window the test will use.
+- **Action:** Spawn `ostia serve`, complete handshake (counts as the initial load fetch). Call `tools/list` twice in quick succession (well within TTL).
+- **Expected:** Both `tools/list` calls succeed with the same profile data. Mock server records exactly 1 GET total. The two `tools/list` calls were served from the in-process cache — no additional GETs.
+
+### C-PS17: Cache expires after TTL → next call refetches and sees new data
+- **Test:** `http_source_after_ttl_refetches_and_sees_new_data` in `crates/ostia-cli/tests/profile_source_refresh.rs`
+- **Setup:** Stateful mock HTTP server (new helper `start_stateful_mock_server`) that initially returns profile YAML containing a single profile named `before`. The test can swap the body to one containing `after` mid-flight. Bootstrap: `cache_ttl: 1s`.
+- **Action:** Spawn, handshake, `tools/list` → sees `before`. Swap the mock body to the `after` YAML. Sleep 1.2s (past TTL). `tools/list` → expected to see `after`.
+- **Expected:** First list returns `[before]`; second list returns `[after]`. The cache expired and a refetch happened.
+
+### C-PS18: Live profile addition (postgres) — new row visible after TTL
+- **Test:** `postgres_source_picks_up_new_profile_after_ttl` in `crates/ostia-cli/tests/profile_source_refresh.rs`
+- **Setup:** Testcontainers postgres seeded with one `baseline` bundle and one `before` profile. Bootstrap: `cache_ttl: 1s`. Spawn ostia, handshake, `tools/list` → `[before]`.
+- **Action:** Open a separate tokio-postgres connection (the test's own, not ostia's) and `INSERT INTO profiles (name, definition) VALUES ('after', ...)`. Sleep 1.2s. `tools/list` again.
+- **Expected:** Second list returns both `before` and `after`. Proves live additions are visible within TTL.
+
+### C-PS19: Live profile removal (postgres) — deleted row gone after TTL
+- **Test:** `postgres_source_picks_up_deleted_profile_after_ttl` in `crates/ostia-cli/tests/profile_source_refresh.rs`
+- **Setup:** Testcontainers postgres seeded with `baseline` bundle and two profiles `alpha` and `beta`. Bootstrap: `cache_ttl: 1s`. Spawn, handshake, `tools/list` → `[alpha, beta]`.
+- **Action:** Test deletes the `beta` row. Sleep 1.2s. `tools/list` again.
+- **Expected:** Second list returns only `[alpha]`. Live removals are visible within TTL.
+
+### C-PS21: Refresh failure is fail-open with loud warning
+- **Test:** `http_source_refresh_failure_is_fail_open` in `crates/ostia-cli/tests/profile_source_refresh.rs`
+- **Setup:** Stateful mock HTTP server that initially returns valid YAML, then can be flipped to return 500. Bootstrap: `cache_ttl: 1s`.
+- **Action:** Spawn, handshake, `tools/list` → `[loaded]`. Flip the mock to 500. Sleep 1.2s. `tools/list` again.
+- **Expected:** Second `tools/list` still returns `[loaded]` (last-good config; ostia did NOT exit, did NOT switch to empty data). Captured stderr (drained from the child process via a pipe-reader thread) contains both the substring `profile source` and the substring `refresh` — proving the loud warning ran.
+
+## Test contracts — invariant cross-references (Slice 2)
+
+- **Initial load remains fail-closed.** Already covered by C-PS7 / C-PS8 / C-PS11 / C-PS12 — those tests assert startup-failure when the source is unreachable at first load. Slice 2 does NOT relax this; the difference (fail-closed initial vs. fail-open refresh) is enforced by C-PS21 above.
+
 ## Tests
+
+Slice 2 — live resolution + TTL cache (`crates/ostia-cli/tests/profile_source_refresh.rs`):
+- `"http_source_within_ttl_does_not_refetch"` — covers § C-PS16.
+- `"http_source_after_ttl_refetches_and_sees_new_data"` — covers § C-PS17.
+- `"postgres_source_picks_up_new_profile_after_ttl"` — covers § C-PS18.
+- `"postgres_source_picks_up_deleted_profile_after_ttl"` — covers § C-PS19.
+- `"http_source_refresh_failure_is_fail_open"` — covers § C-PS21.
+
+Note on C-PS16's red/green state at commit time: C-PS16 passes today because the pre-Slice-2 code loads at startup and serves from in-memory config forever (effectively infinite cache). Together with C-PS17 (red — TTL expiry must produce new data) they bound Slice 2's TTL behavior — infinite-cache passes 16 but fails 17; refetch-every-call would pass 17 but fail 16; only correct TTL respects both.
+
+Slice 1 (built):
 
 File provider (`crates/ostia-cli/tests/profile_source_file.rs`):
 - `"legacy_yaml_config_no_profile_source_block_runs_unchanged"` — covers § C-PS1.
@@ -210,20 +262,23 @@ Postgres provider (`crates/ostia-cli/tests/profile_source_postgres.rs`):
 ## Invariants
 
 - **Backwards compatibility.** Any `--config` YAML that was valid before this slice landed must continue to parse and run with byte-identical behavior. Implicit default: no `profile_source:` block ⇒ inline bundles + profiles, file-on-disk. Tracked also in `spec/profiles.md`.
-- **Fail-closed on source error.** If the source is unreachable, returns an unparseable response, or rejects auth, `ostia serve` exits non-zero before accepting any client connection. A partially-loaded config is never visible to a client.
-- **Single load at startup (Slice 1).** Slice 1 fetches once on startup. There is no refresh, polling, or hot reload. Operators restart `ostia serve` to pick up source changes. Slice 2 lifts this.
+- **Initial load fails closed.** If the source is unreachable, returns an unparseable response, or rejects auth on the initial fetch at startup, `ostia serve` exits non-zero before accepting any client connection. A partially-loaded config is never visible to a client.
+- **TTL-bounded in-process cache (Slice 2).** After a successful initial load, source data is cached in-process for `cache_ttl` (default 30s, configurable). The next `tools/list` or `tools/call` after the cache expires triggers a refresh. Supersedes the Slice 1 "single load at startup" invariant.
+- **Refresh failure after initial load is fail-open.** Once an initial load has succeeded, subsequent refresh failures (source unreachable, returns non-2xx, etc.) do NOT shut down ostia. The last-good config keeps serving; a warning containing the substring `profile source` and `refresh` is written to stderr. Different from the initial-load-fail-closed posture above.
+- **Per-process cache, not cross-container.** Each ostia process maintains its own in-memory cache. In a horizontally-scaled deployment (multiple ostia containers behind a load balancer), each container's view of the source can be stale by up to `cache_ttl` independently. Operators who need strict cross-container freshness should put a write-through cache between containers and the source — see non-goals.
 - **Profile is set at init, not switched mid-session.** Same as today. The source can return many profiles; the orchestrator's choice of profile/endpoint at init is what the client sees.
 - **No identity templating in source URLs.** `{{ user_id }}` is supported in credential URLs (`spec/credentials.md`) but NOT in `profile_source.url` or `profile_source.dsn`. Profile selection is per-deployment, not per-request.
 - **Source data never includes secrets in clear.** Provider config fields named `*_env`, `cert_path`, `key_path`, etc. always point at external sources (env vars, files) — passwords, tokens, and keys are NEVER inline in the bootstrap YAML.
 
 ## Non-goals
 
-- **Refresh / hot reload** — Slice 2.
-- **Hot profile registration** (new profile in source → background binary pull, no restart) — Slice 4.
-- **Binary tarball fetching** — Slice 3 (`spec/binary-source.md` forthcoming).
+- **Cross-container cache coherence.** Each ostia process has its own in-process cache; multi-container deployments will diverge by up to `cache_ttl` on each container until the next refresh. Operators wanting strict freshness across horizontal scale need a write-through cache layer between the containers and the source — that's end-architecture and out of scope for this slice.
+- **Binary tarball fetching** — Slice 3 (`spec/binary-source.md` forthcoming). Slice 2 only proves the live-profile + TTL-cache abstraction; binaries still come from the container image as today.
+- **Diff event consumers in Slice 2.** When a refresh detects added/removed binaries across profiles, the diff is computed and logged. Acting on the diff (background binary pull) is Slice 3's job. Slice 2 just makes the diff observable.
+- **Hot profile registration as a separate slice.** Originally planned as Slice 4. After re-slicing on 2026-05-26, hot registration emerges as a natural consequence of Slice 2 (live cache) + Slice 3 (on-demand binary pull) — no separate spec needed.
 - **Profile *writes*.** Ostia is read-only against the source. Writes happen via whatever external tool owns the data (e.g., a future agent-builder service).
 - **AWS-shaped auth.** IAM tokens for RDS, SigV4 for S3-style endpoints, OIDC federation. Deferred until a real user needs them — `aws-config` is heavy.
-- **OCI registry as a source.** `http` + `file` + `postgres` is the Slice 1 set.
+- **OCI registry as a source.** `http` + `file` + `postgres` is the set across Slices 1–2. Adding OCI would be a new provider impl, same trait surface.
 - **Per-call profile dispatch from the model.** Unchanged from today — profile is locked at init.
 - **Connection pooling for Postgres.** Single client; reconnect on drop. Slice 1 volume doesn't justify pooling.
 - **Schema migrations.** Operators create the `bundles` and `profiles` tables themselves; Ostia does not run DDL.
@@ -239,3 +294,5 @@ Postgres provider (`crates/ostia-cli/tests/profile_source_postgres.rs`):
 - 006 (2026-05-25) — initial creation. Slice 1 of `changes/006-profile-source-providers/`.
 - 006 (2026-05-26) — test-writer landed red integration tests for C-PS1–C-PS15 across three test files; spec `## Tests` section filled in with forward pointers. C-PS1 is green (backwards-compat contract); the other 14 are red until build implements the providers.
 - 006 (2026-05-26) — build landed V0a (`ProfileSource` trait + `FileProfileSource` + bootstrap-config wiring in `serve.rs`) and V0b (`HttpProfileSource` via reqwest+rustls, `PostgresProfileSource` via tokio-postgres). All 15 contracts green; status flipped to `built`. Pre-existing test suite verified non-regressing.
+- 006 (2026-06-11) — Slice 2 test-planning landed C-PS16, C-PS17, C-PS18, C-PS19, C-PS21 (cache hit, TTL expiry, live add/remove, refresh-fail-open). Added `cache_ttl:` to the bootstrap config schema (default 30s). Superseded "single load at startup" invariant with TTL-bounded cache invariant; added fail-open-on-refresh and per-process-cache invariants. Re-sliced the plan: original Slice 4 (hot registration) dissolved into Slices 2+3. C-PS20 (default TTL) intentionally skipped — default is documented in code/spec, no behavioral test. Status flipped from `built` → `in-progress` pending test-writer + build.
+- 006 (2026-06-11) — test-writer committed Slice 2 tests in `crates/ostia-cli/tests/profile_source_refresh.rs`. New mcp_common helpers: `start_counted_mock_server`, `start_stateful_mock_server`, `MockResponseState`, `spawn_with_stderr_capture`. State at commit: C-PS17/C-PS18/C-PS19/C-PS21 red for the right reasons (no TTL cache yet, source loaded once at startup); C-PS16 already green for a forward-compatible reason (load-once-at-startup behavior also satisfies "within TTL no refetch") — together with C-PS17 it bounds Slice 2 behavior correctly. Pre-existing test suite verified non-regressing.
