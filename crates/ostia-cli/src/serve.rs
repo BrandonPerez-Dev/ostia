@@ -206,10 +206,10 @@ impl McpServer {
         command: &str,
     ) -> Value {
         // Slice 3: before constructing the sandbox, ensure every Cached
-        // binary referenced by this profile is actually on disk in the
-        // binary cache. On miss, fetch+stage synchronously (blocking the
-        // call). Per-binary failures surface as a tool_error before any
-        // sandbox setup so the caller sees a clean MCP-shaped error.
+        // binary referenced by this profile is on disk. Per-binary failures
+        // log to stderr (matching C-BS12's fail-open contract) — only the
+        // binary actually invoked by `command` produces a tool_error so other
+        // binaries in the profile can still run.
         let mut profile = match config
             .resolve_profile_with_identity(profile_name, self.user_id.as_deref())
         {
@@ -217,9 +217,11 @@ impl McpServer {
             Err(e) => return tool_error(&format!("{}", e)),
         };
 
+        let invoked = command_invoked_name(command);
+
         if let Some(binary_cache) = self.binary_cache.as_ref() {
             if let Err(e) = self
-                .ensure_cached_binaries(&mut profile, config, binary_cache.as_ref())
+                .ensure_cached_binaries(&mut profile, config, binary_cache.as_ref(), invoked.as_deref())
                 .await
             {
                 return tool_error(&format!("{}", e));
@@ -260,14 +262,18 @@ impl McpServer {
     }
 
     /// Walk a profile's `resolved_binaries`. For each `Cached` entry that's
-    /// missing from the on-disk cache, fetch from its source and stage. On
-    /// failure for a referenced binary, return an error naming the binary so
-    /// the caller can surface it as a tool_error.
+    /// missing from the on-disk cache, fetch from its source and stage.
+    ///
+    /// Per-binary fail-open: a fetch failure for any binary EXCEPT the one
+    /// the user is invoking (`invoked_name`) logs a stderr warning and the
+    /// other binaries continue. The invoked binary's failure becomes an
+    /// `Err` so the caller can surface it as a tool_error.
     async fn ensure_cached_binaries(
         &self,
         profile: &mut Profile,
         config: &OstiaConfig,
         cache: &BinaryCache,
+        invoked_name: Option<&str>,
     ) -> anyhow::Result<()> {
         let pg_params = config
             .profile_source
@@ -281,21 +287,44 @@ impl McpServer {
                 entry,
             } = resolved
             {
-                if !cache.is_cached(&entry.sha256, name, entry) {
-                    fetch_and_stage(cache, name, entry, pg_params.as_ref())
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
+                if cache.is_cached(&entry.sha256, name, entry) {
+                    continue;
+                }
+                match fetch_and_stage(cache, name, entry, pg_params.as_ref()).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        // Log the failure to stderr in the same shape as the
+                        // eager-pull warning (C-BS12 / C-BS15 assert these
+                        // substrings).
+                        eprintln!(
+                            "warning: binary source pull failed for `{}`: {}",
+                            name, e
+                        );
+                        if invoked_name == Some(name.as_str()) {
+                            anyhow::bail!(
                                 "binary `{}` is not available (pull failed): {}",
                                 name,
                                 e
-                            )
-                        })?;
+                            );
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
+}
+
+/// Best-effort extraction of the binary the command is going to invoke.
+/// For "good" this is "good"; for "good --foo" this is "good"; for
+/// "echo backwards-compat" this is "echo". The shell handles real parsing —
+/// this is only used to decide which binary's pull failure should be a
+/// hard error vs a soft warning.
+fn command_invoked_name(command: &str) -> Option<String> {
+    command
+        .split_whitespace()
+        .next()
+        .map(|s| s.to_string())
 }
 
 /// Free helper: walk `profile.resolved_binaries` and produce
