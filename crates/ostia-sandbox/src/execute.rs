@@ -94,7 +94,23 @@ impl SandboxExecutor {
         )
         .context("failed to build command matcher")?;
 
-        let resolution_results = resolve::resolve_profile_binaries(&profile.binaries);
+        // Slice 3: any name in `cache_mounts` is served from the binary cache,
+        // so skip it from the legacy `which`-based ELF resolver. The remainder
+        // (built-ins like `sh`, `echo`, etc. that aren't registry-managed) keep
+        // today's behavior.
+        let cached_names: std::collections::HashSet<String> = profile
+            .cache_mounts
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let path_binaries: std::collections::HashSet<String> = profile
+            .binaries
+            .iter()
+            .filter(|name| !cached_names.contains(*name))
+            .cloned()
+            .collect();
+
+        let resolution_results = resolve::resolve_profile_binaries(&path_binaries);
 
         let mut resolved_binaries = HashMap::new();
         for (name, result) in resolution_results {
@@ -182,6 +198,8 @@ impl SandboxExecutor {
                     &binaries_vec,
                     self.profile.workspace.as_deref(),
                     &self.profile.read_paths,
+                    &self.profile.cache_mounts,
+                    &self.profile.cache_lib_mounts,
                 ) {
                     eprintln!("ostia: namespace setup failed: {}", e);
                     std::process::exit(125);
@@ -453,6 +471,9 @@ mod tests {
                 deny_write_paths: vec![],
                 network_allow: vec![],
                 env: HashMap::new(),
+                resolved_binaries: vec![],
+                cache_mounts: vec![],
+                cache_lib_mounts: vec![],
             },
             matcher,
             resolved_binaries: HashMap::new(),

@@ -233,6 +233,8 @@ pub fn setup_sandbox_namespace(
     binaries: &[ResolvedBinary],
     workspace: Option<&Path>,
     read_paths: &[PathBuf],
+    cache_mounts: &[(String, PathBuf)],
+    cache_lib_mounts: &[PathBuf],
 ) -> Result<()> {
     // ── 1. Create user + mount namespaces ────────────────────────────
     // We need CLONE_NEWUSER to gain CAP_SYS_ADMIN inside the namespace,
@@ -285,6 +287,59 @@ pub fn setup_sandbox_namespace(
         }
         mount_file_ro(&new_root_path, host_path)
             .with_context(|| format!("failed to mount {}", host_path.display()))?;
+    }
+
+    // ── 4b. Slice 3: bind-mount cache-managed binaries at /usr/bin/<name>
+    // (regardless of original host path). For ELF binaries, walk deps and
+    // mount interpreter + libs. For non-ELF (shell scripts, etc.), just
+    // mount the file — sh/bash will interpret.
+    for (name, host_path) in cache_mounts {
+        if !host_path.exists() {
+            continue;
+        }
+        let target = new_root_path.join("usr/bin").join(name);
+        ensure_mount_point(&target)?;
+        bind_mount_readonly(host_path, &target).with_context(|| {
+            format!(
+                "failed to mount cache binary {} -> {}",
+                host_path.display(),
+                target.display()
+            )
+        })?;
+
+        // Best-effort ELF dep walk. Non-ELF (shell scripts) silently skip.
+        if let Ok(resolved) = crate::resolve::resolve_binary_deps(host_path) {
+            if let Some(ref interp) = resolved.interpreter {
+                if interp.exists() {
+                    let interp_target = target_path(&new_root_path, interp);
+                    if !interp_target.exists() {
+                        mount_file_ro(&new_root_path, interp)?;
+                    }
+                }
+            }
+            for lib in &resolved.libraries {
+                if lib.exists() {
+                    let lib_target = target_path(&new_root_path, lib);
+                    if !lib_target.exists() {
+                        mount_file_ro(&new_root_path, lib)?;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 4c. Slice 3: tarball-provided library bind-mounts at /usr/lib/<basename>
+    for lib_path in cache_lib_mounts {
+        if !lib_path.exists() {
+            continue;
+        }
+        let basename = match lib_path.file_name() {
+            Some(b) => b,
+            None => continue,
+        };
+        let target = new_root_path.join("usr/lib").join(basename);
+        ensure_mount_point(&target)?;
+        let _ = bind_mount_readonly(lib_path, &target);
     }
 
     // ── 5. Create merged-usr compatibility symlinks ──────────────────

@@ -158,6 +158,17 @@ pub struct Profile {
     /// Filled by `resolve_profile_with_identity` against the top-level
     /// `binaries:` registry + inline bundle declarations + host PATH.
     pub resolved_binaries: Vec<ResolvedBinaryRef>,
+    /// Cache-managed binary bind-mounts. Each `(name, host_path)` becomes a
+    /// `/usr/bin/<name>` bind-mount inside the sandbox from the host cache
+    /// path. Names in this map should be skipped from the legacy `which`-based
+    /// resolution so the cache version wins. Populated by
+    /// `attach_binary_cache_paths` after `resolve_profile_with_identity`.
+    pub cache_mounts: Vec<(String, PathBuf)>,
+    /// Cache-managed library bind-mounts. Each entry is an absolute host path
+    /// inside the binary cache that the sandbox should mount somewhere
+    /// reachable to the entry binary. For Slice 3, these land at
+    /// `/usr/lib/<basename>`.
+    pub cache_lib_mounts: Vec<PathBuf>,
 }
 
 impl OstiaConfig {
@@ -355,6 +366,8 @@ impl OstiaConfig {
             network_allow,
             env,
             resolved_binaries,
+            cache_mounts: Vec::new(),
+            cache_lib_mounts: Vec::new(),
         })
     }
 
