@@ -14,7 +14,7 @@ The shape mirrors the existing credential-provider pattern (`command | env | fil
 
 - `spec/profile-source.md` (new) — Slice 1. Provider trait for loading profile config. Implementations: `file`, `http`, `postgres`. Auth shape (`AuthSource` enum) lives here. **Status: built (V0a `c1b6ca9` + V0b `d7c96df`).**
 - `spec/profile-source.md` (extended) — Slice 2. **Live profile resolution with TTL cache** (re-slicing 2026-05-26 after user discussion — replaces the original "periodic refresh" framing). `tools/list` and `tools/call` consult an in-process cache; cache miss → source fetch. Default TTL 30s, configurable via `cache_ttl:` on `profile_source:`. Source data diffs (binary set added/removed) are emitted as events for Slice 3 to consume. Initial load remains fail-closed; refresh failures are fail-open with the last-good config + loud logging. **No binary work in this slice** — binaries still come from the container image as today.
-- `spec/binary-source.md` (new) — Slice 3. Binary cache + on-demand fetch. `BinarySource` trait (file/http/s3, mirroring profile-source). Single-binary upload path for statically-linked CLIs (no extraction); tarball path (`.tar.zst` recommended) for dynamically-linked CLIs with bundled libs. Cache at `/var/lib/ostia/binaries/<sha>/<name>`. Consumes Slice 2's diff events to pull added binaries in the background. Perf contract: warm-cache binary readiness < 10ms per tool call; cold-cache blocks the call until binary is staged (worst-case ~10s for a 50MB tarball, acceptable).
+- `spec/binary-source.md` (new) — Slice 3. Binary cache + on-demand fetch. `BinarySource` trait (file/http/postgres-blob, mirroring profile-source). Single-binary upload path for statically-linked CLIs (no extraction); `.tar.gz` tarball for dynamically-linked CLIs with bundled libs (`.tar.zst` deferred). Cache at `/var/lib/ostia/binaries/<sha>/<name>` (configurable via `binary_cache_dir:` in bootstrap YAML). Same source as `profile_source` by default; optional `binary_source:` block in bootstrap for split-registry case. Bundle `binaries:` becomes heterogeneous — plain string (resolves via top-level `binaries:` registry, then host PATH for built-ins) OR inline `{name, source, sha256, format, entry?, libs?}`. Within one profile, the same name must resolve consistently across bundles (else startup error). Across profiles, different versions of the same CLI are fine. Eager pull triggered by Slice 2's binary-diff observable; per-binary fail-open (one bad URL doesn't block other binaries). Perf contract: warm-cache binary readiness < 10ms per tool call; cold-cache blocks the call until binary is staged (worst-case ~10s for a 50MB tarball, acceptable).
 - `spec/profile-registration.md` — **Dissolved into Slices 2+3** after re-slicing. "Hot registration" (new profile in source → background binary pull without restart) emerges naturally from Slice 2's diff detection + Slice 3's on-demand fetch. No separate spec.
 - `spec/profiles.md` (modified) — Backwards-compat invariant landed in Slice 1. No further changes planned.
 - `spec/cli.md` (modified) — No new flag in any slice. `--config` stays as the single entry point.
@@ -110,3 +110,26 @@ Once Slice 1's test contract is locked and the red tests are committed, build ca
 
 ### Context updates planned
 - `context/source-providers.md` (new) — system-level rationale. Forthcoming separate task.
+
+### Slice 3 test planning (2026-06-11)
+
+**Spec created:** `spec/binary-source.md` — 16 contracts (C-BS1 through C-BS16) covering:
+- Registry + bundle resolution (C-BS1–C-BS5, C-BS16) — top-level binaries registry, inline-ref override, host PATH fallback, multi-version, within-profile sha conflict
+- Provider implementations (C-BS6–C-BS9) — http single-binary + tarball, postgres-blob, file
+- Lifecycle (C-BS10–C-BS15) — cold-cache block, eager pull on Slice 2 diff, per-binary fail-open, missing-binary tool call error, warm-cache no-refetch, sha mismatch
+
+**Mock boundaries (Slice 3 follows Slice 2 patterns):**
+- Real: postgres via testcontainers, HTTP via local mock server, file via tempfile
+- New helpers needed for test-writer: counted/stateful BinarySource mocks (HTTP), tarball generation via `tar` + `flate2` dev-deps, cache-dir inspection helpers
+- No new mock-boundary concepts
+
+**Validation-gate methodology decisions (user-confirmed 2026-06-11):**
+- C-BS14 perf: counted-mock zero-refetch assertion (deterministic, matches C-PS16 pattern). Strict `<10ms` benchmark deferred to non-CI instrumentation.
+- C-BS11 eager pull: direct `std::fs::metadata` check on cache dir after refresh TTL elapses, before any tool call.
+- C-BS7 tarball test data: runtime-generated `.tar.gz` via `tar` + `flate2` dev-deps. No fixture blobs in repo.
+
+**Scope:** kept as one slice (16 contracts) rather than sub-slicing into 3a/3b/3c — all contracts reach toward the same thing (CLIs as data).
+
+**Open question flagged in spec Notes section** (not a contract): string-matched whitelisting vs binary-anchored enforcement — see `feedback`-style memory `project_ostia_open_design_questions.md`. Surfaces during build for design conversation.
+
+**Spec `README.md` updated** with the new Binary Source row (marked `*(planned)*`).

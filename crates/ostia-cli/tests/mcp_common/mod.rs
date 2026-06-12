@@ -844,3 +844,159 @@ profiles:
     std::io::Write::write_all(&mut f, config.as_bytes()).expect("write config");
     f
 }
+
+// ─── Slice 3 helpers: binary fixtures, sha256, tarball generation, binary mock server ───
+
+/// Build a tiny POSIX shell script that echoes a known string. Used as a
+/// stand-in for a "binary" the tests can compare bytes against — the same
+/// `echo_string` always produces the same bytes, and therefore the same sha256.
+pub fn make_fake_binary_bytes(echo_string: &str) -> Vec<u8> {
+    format!("#!/bin/sh\necho '{}'\n", echo_string).into_bytes()
+}
+
+/// Compute the lowercase-hex sha256 of the given bytes.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let result = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for b in result {
+        use std::fmt::Write;
+        write!(out, "{:02x}", b).unwrap();
+    }
+    out
+}
+
+/// Build a `.tar.gz` containing one entry at `bin/<entry_name>` with the given
+/// bytes (mode 0o755). Returns the compressed tarball bytes. Used for C-BS7.
+pub fn make_fake_tarball(entry_name: &str, entry_bytes: &[u8]) -> Vec<u8> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let mut tar_buf: Vec<u8> = Vec::new();
+    {
+        let mut tar_writer = tar::Builder::new(&mut tar_buf);
+        let mut header = tar::Header::new_gnu();
+        header
+            .set_path(format!("bin/{}", entry_name))
+            .expect("set tar path");
+        header.set_size(entry_bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar_writer
+            .append(&header, entry_bytes)
+            .expect("write tar entry");
+        tar_writer.finish().expect("finish tar");
+    }
+
+    let mut gz_buf: Vec<u8> = Vec::new();
+    {
+        let mut encoder = GzEncoder::new(&mut gz_buf, Compression::default());
+        encoder.write_all(&tar_buf).expect("write gz");
+        encoder.finish().expect("finish gz");
+    }
+    gz_buf
+}
+
+/// Start a multi-request mock HTTP server that returns raw binary bytes.
+/// Returns `(port, request_counter)`. `Content-Type: application/octet-stream`.
+pub fn start_counted_binary_mock(
+    body: Vec<u8>,
+) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind counted binary mock");
+    let port = listener.local_addr().unwrap().port();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_for_thread = Arc::clone(&counter);
+
+    std::thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else { break };
+            counter_for_thread.fetch_add(1, Ordering::SeqCst);
+
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(headers.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+
+    (port, counter)
+}
+
+/// Start a mock HTTP server that returns the given status + a short body on
+/// every request. Used to simulate a bad binary URL for C-BS12.
+pub fn start_failing_binary_mock(status: u16) -> u16 {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failing binary mock");
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else { break };
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+
+            let body = "error";
+            let response = format!(
+                "HTTP/1.1 {status} STATUS\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    port
+}
+
+/// Like `start_counted_binary_mock` but introduces an artificial delay before
+/// responding. Used for C-BS10 to make "cold-cache call blocks" assertable.
+pub fn start_delayed_binary_mock(
+    body: Vec<u8>,
+    delay: std::time::Duration,
+) -> u16 {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind delayed binary mock");
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else { break };
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+
+            std::thread::sleep(delay);
+
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(headers.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+
+    port
+}
+
+/// Create a tempdir to use as the `binary_cache_dir:` value. The returned
+/// guard cleans up on drop.
+pub fn temp_binary_cache_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("create binary_cache_dir tempdir")
+}
