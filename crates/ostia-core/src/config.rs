@@ -2,6 +2,8 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::binary::{BinaryEntry, BundleBinary, ResolvedBinaryRef};
+
 /// Server-level auth mode configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthModeDef {
@@ -30,16 +32,38 @@ pub struct OstiaConfig {
     /// behavior). See `spec/profile-source.md`.
     #[serde(default)]
     pub profile_source: Option<crate::source::ProfileSourceDef>,
+    /// Optional top-level binary registry. Bundles' string-form `binaries:`
+    /// entries resolve here first, then fall back to host PATH for built-ins.
+    /// See `spec/binary-source.md`.
+    #[serde(default)]
+    pub binaries: HashMap<String, BinaryEntry>,
+    /// Where the binary cache lives on disk. Defaults to
+    /// `/var/lib/ostia/binaries` if absent and any registered binary is used.
+    #[serde(default)]
+    pub binary_cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Bundle {
     #[serde(default)]
     pub description: Option<String>,
+    /// Heterogeneous binary list. Each entry is either a plain string (resolved
+    /// against the top-level `binaries:` registry, then host PATH) or an inline
+    /// object that fully declares the source/sha/format in place. See
+    /// `spec/binary-source.md` § "Bundle schema change".
     #[serde(default)]
-    pub binaries: Vec<String>,
+    pub binaries: Vec<BundleBinary>,
     #[serde(default)]
     pub subcommands: Vec<String>,
+}
+
+impl Bundle {
+    /// All binary names this bundle references, regardless of inline vs
+    /// registry form. Used by callers that only need the namespace, not the
+    /// full declaration (e.g., profile description rendering).
+    pub fn binary_names(&self) -> impl Iterator<Item = &str> {
+        self.binaries.iter().map(|b| b.name())
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -128,6 +152,12 @@ pub struct Profile {
     pub deny_write_paths: Vec<PathBuf>,
     pub network_allow: Vec<String>,
     pub env: HashMap<String, String>,
+    /// Resolved binary references — one per binary name in `binaries`.
+    /// `Cached` entries describe a cache-managed binary (file path inside the
+    /// cache root). `HostPath` falls back to today's `which`-based discovery.
+    /// Filled by `resolve_profile_with_identity` against the top-level
+    /// `binaries:` registry + inline bundle declarations + host PATH.
+    pub resolved_binaries: Vec<ResolvedBinaryRef>,
 }
 
 impl OstiaConfig {
@@ -204,6 +234,11 @@ impl OstiaConfig {
 
         let mut binaries = HashSet::new();
         let mut subcommand_allows = Vec::new();
+        // (name → entry) tracker for within-profile conflict detection. Each
+        // binary name in this profile that resolves to a cache-managed entry
+        // must agree on its sha across all bundles that reference it.
+        let mut resolved_map: HashMap<String, ResolvedBinaryRef> = HashMap::new();
+        let mut shas_seen: HashMap<String, String> = HashMap::new();
 
         // Merge bundles (config-defined take precedence over built-ins)
         let builtins = crate::builtins::builtin_bundles();
@@ -213,13 +248,66 @@ impl OstiaConfig {
                 .get(bundle_name)
                 .or_else(|| builtins.get(bundle_name))
                 .ok_or_else(|| anyhow::anyhow!("bundle '{}' not found in config or built-ins", bundle_name))?;
-            binaries.extend(bundle.binaries.iter().cloned());
+            for bin in &bundle.binaries {
+                let bin_name = bin.name().to_string();
+                binaries.insert(bin_name.clone());
+                let entry_for_resolution: Option<BinaryEntry> = match bin {
+                    BundleBinary::Inline(inline) => Some(inline.to_entry()),
+                    BundleBinary::Name(_) => self.binaries.get(&bin_name).cloned(),
+                };
+                let resolved = match entry_for_resolution {
+                    Some(entry) => {
+                        if let Some(prev_sha) = shas_seen.get(&bin_name) {
+                            if prev_sha != &entry.sha256 {
+                                anyhow::bail!(
+                                    "profile `{}`: binary `{}` has inconsistent sha256 across bundles: \
+                                     `{}` (conflict / mismatch). Pin a single version per profile.",
+                                    name,
+                                    bin_name,
+                                    entry.sha256,
+                                );
+                            }
+                        } else {
+                            shas_seen.insert(bin_name.clone(), entry.sha256.clone());
+                        }
+                        ResolvedBinaryRef::Cached {
+                            name: bin_name.clone(),
+                            sha256: entry.sha256.clone(),
+                            entry,
+                        }
+                    }
+                    None => ResolvedBinaryRef::HostPath {
+                        name: bin_name.clone(),
+                    },
+                };
+                resolved_map.insert(bin_name, resolved);
+            }
             subcommand_allows.extend(bundle.subcommands.iter().cloned());
         }
 
-        // Add profile-level tools
+        // Add profile-level tools (still string form; resolve against registry)
         if let Some(tools) = &profile_def.tools {
-            binaries.extend(tools.binaries.iter().cloned());
+            for tool_bin in &tools.binaries {
+                binaries.insert(tool_bin.clone());
+                if !resolved_map.contains_key(tool_bin) {
+                    let resolved = match self.binaries.get(tool_bin) {
+                        Some(entry) => {
+                            shas_seen
+                                .entry(tool_bin.clone())
+                                .or_insert_with(|| entry.sha256.clone());
+                            ResolvedBinaryRef::Cached {
+                                name: tool_bin.clone(),
+                                sha256: entry.sha256.clone(),
+                                entry: entry.clone(),
+                            }
+                        }
+                        None => ResolvedBinaryRef::HostPath {
+                            name: tool_bin.clone(),
+                        },
+                    };
+                    resolved_map.insert(tool_bin.clone(), resolved);
+                }
+            }
             subcommand_allows.extend(tools.subcommands.iter().cloned());
         }
 
@@ -249,6 +337,12 @@ impl OstiaConfig {
             env.extend(cred_env);
         }
 
+        let mut resolved_binaries: Vec<ResolvedBinaryRef> =
+            resolved_map.into_values().collect();
+        // Stable ordering by binary name so downstream walkers behave the same
+        // run-to-run (useful in tests + log output).
+        resolved_binaries.sort_by(|a, b| a.name().cmp(b.name()));
+
         Ok(Profile {
             name: name.to_string(),
             binaries,
@@ -260,6 +354,7 @@ impl OstiaConfig {
             deny_write_paths,
             network_allow,
             env,
+            resolved_binaries,
         })
     }
 
@@ -303,7 +398,7 @@ impl OstiaConfig {
                     .get(bundle_name)
                     .or_else(|| builtins.get(bundle_name))
             })
-            .flat_map(|b| b.binaries.iter().cloned())
+            .flat_map(|b| b.binary_names().map(|n| n.to_string()))
             .collect();
 
         let notable: Vec<&str> = profile_def

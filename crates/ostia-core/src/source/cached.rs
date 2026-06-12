@@ -130,8 +130,8 @@ fn binary_set(sourced: &SourcedConfig) -> HashSet<String> {
     for profile in sourced.profiles.values() {
         for bundle_name in &profile.bundles {
             if let Some(bundle) = sourced.bundles.get(bundle_name) {
-                for bin in &bundle.binaries {
-                    set.insert(bin.clone());
+                for name in bundle.binary_names() {
+                    set.insert(name.to_string());
                 }
             }
         }

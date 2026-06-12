@@ -3,8 +3,16 @@
 //! These bundles are available to all configs without explicit definition.
 //! Config-defined bundles with the same name take precedence.
 
+use crate::binary::BundleBinary;
 use crate::config::Bundle;
 use std::collections::HashMap;
+
+fn names(items: &[&str]) -> Vec<BundleBinary> {
+    items
+        .iter()
+        .map(|s| BundleBinary::Name((*s).to_string()))
+        .collect()
+}
 
 pub fn builtin_bundles() -> HashMap<String, Bundle> {
     let mut bundles = HashMap::new();
@@ -13,13 +21,10 @@ pub fn builtin_bundles() -> HashMap<String, Bundle> {
         "baseline".into(),
         Bundle {
             description: None,
-            binaries: vec![
+            binaries: names(&[
                 "sh", "bash", "cat", "grep", "ls", "find", "head", "tail",
                 "jq", "wc", "sed", "awk", "echo", "date", "whoami",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+            ]),
             subcommands: vec![],
         },
     );
@@ -28,7 +33,7 @@ pub fn builtin_bundles() -> HashMap<String, Bundle> {
         "git-read".into(),
         Bundle {
             description: None,
-            binaries: vec!["git".into()],
+            binaries: names(&["git"]),
             subcommands: vec![
                 "git log *".into(),
                 "git diff *".into(),
@@ -44,7 +49,7 @@ pub fn builtin_bundles() -> HashMap<String, Bundle> {
         "git-write".into(),
         Bundle {
             description: None,
-            binaries: vec!["git".into()],
+            binaries: names(&["git"]),
             subcommands: vec![
                 "git add *".into(),
                 "git commit *".into(),
@@ -62,7 +67,7 @@ pub fn builtin_bundles() -> HashMap<String, Bundle> {
         "github-read".into(),
         Bundle {
             description: None,
-            binaries: vec!["gh".into()],
+            binaries: names(&["gh"]),
             subcommands: vec![
                 "gh pr list *".into(),
                 "gh pr view *".into(),
@@ -77,7 +82,7 @@ pub fn builtin_bundles() -> HashMap<String, Bundle> {
         "github-rw".into(),
         Bundle {
             description: None,
-            binaries: vec!["gh".into()],
+            binaries: names(&["gh"]),
             subcommands: vec![
                 "gh pr list *".into(),
                 "gh pr view *".into(),
@@ -94,7 +99,7 @@ pub fn builtin_bundles() -> HashMap<String, Bundle> {
         "k8s-read".into(),
         Bundle {
             description: None,
-            binaries: vec!["kubectl".into()],
+            binaries: names(&["kubectl"]),
             subcommands: vec![
                 "kubectl get *".into(),
                 "kubectl describe *".into(),
@@ -107,7 +112,7 @@ pub fn builtin_bundles() -> HashMap<String, Bundle> {
         "docker".into(),
         Bundle {
             description: None,
-            binaries: vec!["docker".into()],
+            binaries: names(&["docker"]),
             subcommands: vec![
                 "docker build *".into(),
                 "docker run *".into(),
@@ -138,9 +143,10 @@ mod tests {
     fn baseline_has_common_utilities() {
         let bundles = builtin_bundles();
         let baseline = &bundles["baseline"];
+        let names: Vec<&str> = baseline.binary_names().collect();
         for bin in &["echo", "cat", "ls", "grep", "sed"] {
             assert!(
-                baseline.binaries.contains(&bin.to_string()),
+                names.contains(bin),
                 "baseline missing: {}",
                 bin
             );

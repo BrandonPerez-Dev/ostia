@@ -1,9 +1,14 @@
+pub mod binary;
 pub mod builtins;
 pub mod config;
 pub mod credentials;
 pub mod matcher;
 pub mod source;
 
+pub use binary::{
+    BinaryCache, BinaryEntry, BinaryFormat, BinarySourceDef, BundleBinary, PostgresBlobParams,
+    ResolvedBinaryRef,
+};
 pub use config::{Bundle, CredentialDef, OstiaConfig, Profile};
 pub use credentials::fetch_credentials;
 pub use matcher::CommandMatcher;
