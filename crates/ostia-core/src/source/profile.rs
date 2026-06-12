@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 use serde::Deserialize;
 
+use crate::binary::BinaryEntry;
 use crate::config::{Bundle, ProfileDef};
 
 /// Default cache TTL applied when a `cache_ttl:` field is absent from
@@ -15,14 +16,16 @@ pub fn default_cache_ttl() -> Duration {
     Duration::from_secs(30)
 }
 
-/// Parsed bundles + profiles returned by a source's `load()` call.
+/// Parsed bundles + profiles + binary registry returned by a source's `load()` call.
 ///
 /// This is the operational content the source provides. Bootstrap concerns
-/// (server-level auth mode, endpoints) stay on the outer `OstiaConfig`.
+/// (server-level auth mode, endpoints, binary_cache_dir) stay on the outer
+/// `OstiaConfig`. Slice 3 added the `binaries` registry.
 #[derive(Debug, Default)]
 pub struct SourcedConfig {
     pub bundles: HashMap<String, Bundle>,
     pub profiles: HashMap<String, ProfileDef>,
+    pub binaries: HashMap<String, BinaryEntry>,
 }
 
 /// The async surface every profile-source implementation exposes.

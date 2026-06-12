@@ -117,6 +117,13 @@ impl ProfileSource for PostgresProfileSource {
                     e
                 )
             })?;
+        // Slice 3: optional `binaries` table. Missing table is non-fatal —
+        // operators on Slice 2-style schemas just don't have a binary registry.
+        let binary_rows = client
+            .query("SELECT name, definition FROM binaries", &[])
+            .await
+            .ok()
+            .unwrap_or_default();
 
         let mut bundles: HashMap<String, Bundle> = HashMap::new();
         for row in bundle_rows {
@@ -146,9 +153,27 @@ impl ProfileSource for PostgresProfileSource {
             profiles.insert(name, profile);
         }
 
+        let mut binaries: HashMap<String, crate::binary::BinaryEntry> = HashMap::new();
+        for row in binary_rows {
+            let name: String = row.get(0);
+            let def: serde_json::Value = row.get(1);
+            let entry: crate::binary::BinaryEntry = serde_json::from_value(def).map_err(|e| {
+                anyhow::anyhow!(
+                    "profile source (postgres): failed to deserialize binary `{}`: {}",
+                    name,
+                    e
+                )
+            })?;
+            binaries.insert(name, entry);
+        }
+
         drop(client);
         conn_handle.abort();
 
-        Ok(SourcedConfig { bundles, profiles })
+        Ok(SourcedConfig {
+            bundles,
+            profiles,
+            binaries,
+        })
     }
 }

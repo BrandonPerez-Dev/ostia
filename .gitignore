@@ -3,3 +3,5 @@
 *.swo
 .DS_Store
 .claude/
+docker/gws-credentials/
+workspace/

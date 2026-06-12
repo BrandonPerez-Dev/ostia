@@ -65,6 +65,10 @@ impl McpServer {
                     profiles: sourced.profiles,
                     endpoints: prev.endpoints.clone(),
                     profile_source: prev.profile_source.clone(),
+                    // Slice 3: source-provided binary registry replaces inline.
+                    // Bootstrap's `binary_cache_dir` stays put.
+                    binaries: sourced.binaries,
+                    binary_cache_dir: prev.binary_cache_dir.clone(),
                 };
                 {
                     let mut guard = self.config_state.write().await;

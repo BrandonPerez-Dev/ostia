@@ -315,6 +315,30 @@ Ostia enforces isolation at multiple layers:
 - Landlock enforcement depends on kernel version (5.13+ for filesystem, 6.8+ for network)
 - The sandbox runs as an unprivileged user inside its namespace, but Ostia itself needs to run as a user with permission to create user namespaces
 
+## Troubleshooting
+
+### Sandbox namespace setup fails inside Docker (macOS / Colima)
+
+```
+ostia: namespace setup failed: failed to write /proc/self/setgroups
+```
+
+**Cause:** Ubuntu 24.04's AppArmor restriction on unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`). This affects macOS developers using Docker via Colima/Lima, where the underlying VM runs Ubuntu 24.04. The restriction is a [distro-specific patch](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces), not a mainline kernel change. See [lima-vm/lima#2319](https://github.com/lima-vm/lima/issues/2319).
+
+**Fix:** Disable the restriction in the Lima VM:
+
+```bash
+# One-time fix (resets on VM restart):
+colima ssh -- sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+# Persist across reboots:
+colima ssh -- sudo sh -c 'echo kernel.apparmor_restrict_unprivileged_userns=0 > /etc/sysctl.d/99-userns.conf'
+```
+
+Newer Lima versions apply this automatically. If you're on an older version, run the persistent fix above.
+
+**Note:** Production Linux environments are unaffected unless running Ubuntu 24.04 with default AppArmor config, which is uncommon for servers.
+
 ## Contributing
 
 Contributions are welcome. Please open an issue before submitting large PRs.

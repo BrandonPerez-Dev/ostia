@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use crate::binary::BinaryEntry;
 use crate::config::{Bundle, ProfileDef};
 
 use super::profile::{ProfileSource, SourcedConfig};
@@ -36,6 +37,8 @@ pub(crate) struct SourceContent {
     pub bundles: HashMap<String, Bundle>,
     #[serde(default)]
     pub profiles: HashMap<String, ProfileDef>,
+    #[serde(default)]
+    pub binaries: HashMap<String, BinaryEntry>,
 }
 
 impl From<SourceContent> for SourcedConfig {
@@ -43,6 +46,7 @@ impl From<SourceContent> for SourcedConfig {
         SourcedConfig {
             bundles: s.bundles,
             profiles: s.profiles,
+            binaries: s.binaries,
         }
     }
 }

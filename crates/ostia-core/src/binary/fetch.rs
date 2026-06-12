@@ -10,7 +10,8 @@ use std::path::Path;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use secrecy::ExposeSecret;
 
-use crate::source::{AuthSource, AuthSourceDef, ProfileSourceDef, WhichEnv};
+use crate::source::profile::WhichEnv;
+use crate::source::{AuthSource, AuthSourceDef, ProfileSourceDef};
 
 use super::schema::{BinarySourceDef, HttpAuthDef};
 
