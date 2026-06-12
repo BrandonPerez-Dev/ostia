@@ -292,14 +292,16 @@ pub fn setup_sandbox_namespace(
     // ── 4b. Slice 3: bind-mount cache-managed binaries at /usr/bin/<name>
     // (regardless of original host path). For ELF binaries, walk deps and
     // mount interpreter + libs. For non-ELF (shell scripts, etc.), just
-    // mount the file — sh/bash will interpret.
+    // mount the file — sh/bash will interpret. Use the best-effort RO
+    // variant because in user namespaces the remount-RO step can EPERM
+    // when the source mount is locked.
     for (name, host_path) in cache_mounts {
         if !host_path.exists() {
             continue;
         }
         let target = new_root_path.join("usr/bin").join(name);
         ensure_mount_point(&target)?;
-        bind_mount_readonly(host_path, &target).with_context(|| {
+        bind_mount_readonly_best_effort(host_path, &target).with_context(|| {
             format!(
                 "failed to mount cache binary {} -> {}",
                 host_path.display(),

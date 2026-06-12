@@ -1,14 +1,22 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::Json;
+use ostia_core::binary::{
+    fetch_bytes, BinaryCache, BinaryEntry, PostgresBlobParams, ResolvedBinaryRef,
+};
 use ostia_core::source::{CachedProfileSource, RefreshOutcome};
-use ostia_core::OstiaConfig;
+use ostia_core::{OstiaConfig, Profile};
 use ostia_sandbox::SandboxExecutor;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::RwLock;
+
+/// Default location of the on-disk binary cache when the operator hasn't set
+/// `binary_cache_dir:` in bootstrap config. Matches the path documented in
+/// `spec/binary-source.md`.
+const DEFAULT_BINARY_CACHE_DIR: &str = "/var/lib/ostia/binaries";
 
 struct McpServer {
     /// Live OstiaConfig snapshot. Held behind an RwLock so that refreshes
@@ -20,6 +28,10 @@ struct McpServer {
     /// `profile_source:` block (legacy inline-only mode); in that case there
     /// is nothing to refresh.
     cache: Option<Arc<CachedProfileSource>>,
+    /// On-disk binary cache (`<binary_cache_dir>/<sha>/<name>`). `None` when
+    /// the bootstrap config has no registered binaries AND no explicit
+    /// `binary_cache_dir:` — Slice 2 backwards-compat path.
+    binary_cache: Option<Arc<BinaryCache>>,
     user_id: Option<String>,
 }
 
@@ -27,11 +39,13 @@ impl McpServer {
     fn new(
         config: OstiaConfig,
         cache: Option<Arc<CachedProfileSource>>,
+        binary_cache: Option<Arc<BinaryCache>>,
         user_id: Option<&str>,
     ) -> Self {
         Self {
             config_state: Arc::new(RwLock::new(Arc::new(config))),
             cache,
+            binary_cache,
             user_id: user_id.map(|s| s.to_string()),
         }
     }
@@ -59,6 +73,7 @@ impl McpServer {
                 // off the existing snapshot, then overriding bundles+profiles
                 // with the freshly-sourced data.
                 let prev = self.current_config().await;
+                let new_binaries = sourced.binaries.clone();
                 let new_config = OstiaConfig {
                     auth: prev.auth.clone(),
                     bundles: sourced.bundles,
@@ -70,15 +85,29 @@ impl McpServer {
                     binaries: sourced.binaries,
                     binary_cache_dir: prev.binary_cache_dir.clone(),
                 };
+                let pg_params = prev
+                    .profile_source
+                    .as_ref()
+                    .and_then(|def| PostgresBlobParams::from_profile_source(def).ok());
                 {
                     let mut guard = self.config_state.write().await;
                     *guard = Arc::new(new_config);
                 }
                 if !binary_diff.is_empty() {
                     eprintln!(
-                        "info: profile source refresh: binary set changed (added={:?}, removed={:?})",
+                        "info: binary diff: added={:?}, removed={:?}",
                         binary_diff.added, binary_diff.removed
                     );
+                    // Slice 3: eager-pull each added binary in the background.
+                    // Per-binary fail-open with a loud stderr warning.
+                    if let Some(binary_cache) = self.binary_cache.as_ref() {
+                        spawn_eager_pulls(
+                            Arc::clone(binary_cache),
+                            binary_diff.added.clone(),
+                            new_binaries,
+                            pg_params,
+                        );
+                    }
                 }
             }
             RefreshOutcome::Failed { error } => {
@@ -176,13 +205,30 @@ impl McpServer {
         profile_name: &str,
         command: &str,
     ) -> Value {
-        let config = config.clone();
-        let profile_name = profile_name.to_string();
-        let command = command.to_string();
-        let user_id = self.user_id.clone();
+        // Slice 3: before constructing the sandbox, ensure every Cached
+        // binary referenced by this profile is actually on disk in the
+        // binary cache. On miss, fetch+stage synchronously (blocking the
+        // call). Per-binary failures surface as a tool_error before any
+        // sandbox setup so the caller sees a clean MCP-shaped error.
+        let mut profile = match config
+            .resolve_profile_with_identity(profile_name, self.user_id.as_deref())
+        {
+            Ok(p) => p,
+            Err(e) => return tool_error(&format!("{}", e)),
+        };
 
+        if let Some(binary_cache) = self.binary_cache.as_ref() {
+            if let Err(e) = self
+                .ensure_cached_binaries(&mut profile, config, binary_cache.as_ref())
+                .await
+            {
+                return tool_error(&format!("{}", e));
+            }
+            attach_cache_mounts(&mut profile, binary_cache.as_ref());
+        }
+
+        let command = command.to_string();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let profile = config.resolve_profile_with_identity(&profile_name, user_id.as_deref())?;
             let executor = SandboxExecutor::from_profile(profile)?;
             executor.execute(&command)
         })
@@ -211,6 +257,125 @@ impl McpServer {
             Ok(Err(e)) => tool_error(&format!("{}", e)),
             Err(e) => tool_error(&format!("internal error: {}", e)),
         }
+    }
+
+    /// Walk a profile's `resolved_binaries`. For each `Cached` entry that's
+    /// missing from the on-disk cache, fetch from its source and stage. On
+    /// failure for a referenced binary, return an error naming the binary so
+    /// the caller can surface it as a tool_error.
+    async fn ensure_cached_binaries(
+        &self,
+        profile: &mut Profile,
+        config: &OstiaConfig,
+        cache: &BinaryCache,
+    ) -> anyhow::Result<()> {
+        let pg_params = config
+            .profile_source
+            .as_ref()
+            .and_then(|def| PostgresBlobParams::from_profile_source(def).ok());
+
+        for resolved in &profile.resolved_binaries {
+            if let ResolvedBinaryRef::Cached {
+                name,
+                sha256: _,
+                entry,
+            } = resolved
+            {
+                if !cache.is_cached(&entry.sha256, name, entry) {
+                    fetch_and_stage(cache, name, entry, pg_params.as_ref())
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "binary `{}` is not available (pull failed): {}",
+                                name,
+                                e
+                            )
+                        })?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Free helper: walk `profile.resolved_binaries` and produce
+/// (name, host_cache_path) entries for `Cached` variants the on-disk cache
+/// can satisfy. Also collects tarball lib paths. Mutates the profile in place.
+fn attach_cache_mounts(profile: &mut Profile, cache: &BinaryCache) {
+    let mut mounts: Vec<(String, PathBuf)> = Vec::new();
+    let mut lib_mounts: Vec<PathBuf> = Vec::new();
+    for resolved in &profile.resolved_binaries {
+        if let ResolvedBinaryRef::Cached {
+            name,
+            sha256: _,
+            entry,
+        } = resolved
+        {
+            let path = cache.entry_path(&entry.sha256, name, entry);
+            if path.exists() {
+                mounts.push((name.clone(), path));
+                for lp in cache.lib_paths(&entry.sha256, entry) {
+                    if lp.exists() {
+                        lib_mounts.push(lp);
+                    }
+                }
+            }
+        }
+    }
+    profile.cache_mounts = mounts;
+    profile.cache_lib_mounts = lib_mounts;
+}
+
+/// Fetch the binary's bytes from its source and stage them into the cache.
+async fn fetch_and_stage(
+    cache: &BinaryCache,
+    name: &str,
+    entry: &BinaryEntry,
+    pg_params: Option<&PostgresBlobParams>,
+) -> anyhow::Result<PathBuf> {
+    let bytes = fetch_bytes(name, &entry.source, pg_params).await?;
+    let cache = cache.clone();
+    let name = name.to_string();
+    let entry = entry.clone();
+    let path = tokio::task::spawn_blocking(move || cache.stage(&name, &entry, &bytes))
+        .await
+        .map_err(|e| anyhow::anyhow!("internal join error: {}", e))??;
+    Ok(path)
+}
+
+/// Spawn background eager-pull tasks for the binaries in `added`. Each task
+/// fails open: a single pull failure logs a loud stderr warning but does not
+/// block other binaries. Used by `refresh_if_due` after a successful refresh
+/// observes a non-empty `BinaryDiff`.
+fn spawn_eager_pulls(
+    cache: Arc<BinaryCache>,
+    added: Vec<String>,
+    binaries: std::collections::HashMap<String, BinaryEntry>,
+    pg_params: Option<PostgresBlobParams>,
+) {
+    for name in added {
+        let Some(entry) = binaries.get(&name).cloned() else {
+            continue;
+        };
+        let cache_clone = Arc::clone(&cache);
+        let pg_params_clone = pg_params.clone();
+        tokio::spawn(async move {
+            // If already cached, skip. Avoids repulling on transient diffs.
+            if cache_clone.is_cached(&entry.sha256, &name, &entry) {
+                return;
+            }
+            match fetch_and_stage(cache_clone.as_ref(), &name, &entry, pg_params_clone.as_ref())
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!(
+                        "warning: binary source pull failed for `{}`: {}",
+                        name, e
+                    );
+                }
+            }
+        });
     }
 }
 
@@ -453,7 +618,38 @@ pub async fn run_serve(
     let (config, cache) = OstiaConfig::load_resolved_with_cache(config_path)
         .await
         .map_err(|e| anyhow::anyhow!("profile source: {}", e))?;
-    let server = Arc::new(McpServer::new(config, cache, user_id));
+
+    // Slice 3: validate every profile resolves cleanly at startup. The
+    // within-profile sha conflict check (C-BS5) bails here so the operator
+    // sees a clean error before any listener binds. Errors carry the
+    // binary name + profile name; the spec asserts those substrings.
+    for profile_name in config.profiles.keys() {
+        config
+            .resolve_profile_with_identity(profile_name, None)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
+
+    // Slice 3: instantiate the binary cache when needed. The bootstrap config
+    // signals intent via either an explicit `binary_cache_dir:` OR a non-empty
+    // top-level `binaries:` registry. Pure Slice-2 configs (no registry, no
+    // cache dir) skip the cache entirely so the legacy host-PATH path remains
+    // unchanged.
+    let binary_cache = if config.binary_cache_dir.is_some() || !config.binaries.is_empty() {
+        let dir = config
+            .binary_cache_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY_CACHE_DIR));
+        match BinaryCache::new(&dir) {
+            Ok(bc) => Some(Arc::new(bc)),
+            Err(e) => {
+                return Err(anyhow::anyhow!("binary cache: {}", e));
+            }
+        }
+    } else {
+        None
+    };
+
+    let server = Arc::new(McpServer::new(config, cache, binary_cache, user_id));
 
     match transport {
         "stdio" => serve_stdio(server).await,
